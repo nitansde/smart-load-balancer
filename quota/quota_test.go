@@ -377,3 +377,26 @@ func TestWindowNextReset(t *testing.T) {
 		t.Fatalf("monthly roll-forward = %v, want ~%v", got, want)
 	}
 }
+
+func TestParseUsageMonthly(t *testing.T) {
+	now := time.Now()
+	parsed, err := ParseUsage([]byte(`{
+		"plan_type": "pro",
+		"rate_limit": {
+			"primary_window": {"used_percent": 12.5, "limit_window_seconds": 18000, "reset_after_seconds": 3600},
+			"secondary_window": {"used_percent": 63.0, "limit_window_seconds": 2592000, "reset_after_seconds": 864000}
+		}
+	}`), now)
+	if err != nil {
+		t.Fatalf("ParseUsage: %v", err)
+	}
+	if parsed.Long == nil || parsed.Long.Kind != WindowMonthly {
+		t.Fatalf("monthly window must land in Long: %+v", parsed.Long)
+	}
+	if got := *parsed.Long.UsedPercent; got != 63.0 {
+		t.Fatalf("monthly used = %v, want 63", got)
+	}
+	if want := now.Add(864000 * time.Second); !parsed.Long.ResetAt.Equal(want) {
+		t.Fatalf("monthly reset = %v, want %v", parsed.Long.ResetAt, want)
+	}
+}

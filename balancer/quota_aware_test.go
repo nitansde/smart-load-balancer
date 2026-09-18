@@ -184,9 +184,9 @@ func TestPickWithQuota_ResetSoonestFirst(t *testing.T) {
 	now := time.Now()
 	cands := candidates("a", "b", "c")
 	resolver := stubResolver{infos: map[string]QuotaInfo{
-		"a": {Known: true, UsedPercent: pct(90), WeeklyResetAt: now.Add(5 * 24 * time.Hour)},
-		"b": {Known: true, UsedPercent: pct(10), WeeklyResetAt: now.Add(24 * time.Hour)},
-		"c": {Known: true, UsedPercent: pct(50), WeeklyResetAt: now.Add(3 * 24 * time.Hour)},
+		"a": {Known: true, UsedPercent: pct(90), LongResetAt: now.Add(5 * 24 * time.Hour)},
+		"b": {Known: true, UsedPercent: pct(10), LongResetAt: now.Add(24 * time.Hour)},
+		"c": {Known: true, UsedPercent: pct(50), LongResetAt: now.Add(3 * 24 * time.Hour)},
 	}}
 	authID, ok := b.PickWithQuota("key", cands, quotaTestConfig(), resolver)
 	if !ok || authID != "b" {
@@ -200,8 +200,8 @@ func TestPickWithQuota_ResetOutranksFillFirst(t *testing.T) {
 	cands := candidates("a", "b")
 	resolver := stubResolver{infos: map[string]QuotaInfo{
 		// a resets much sooner but is less used: reset time wins.
-		"a": {Known: true, UsedPercent: pct(10), WeeklyResetAt: now.Add(24 * time.Hour)},
-		"b": {Known: true, UsedPercent: pct(90), WeeklyResetAt: now.Add(5 * 24 * time.Hour)},
+		"a": {Known: true, UsedPercent: pct(10), LongResetAt: now.Add(24 * time.Hour)},
+		"b": {Known: true, UsedPercent: pct(90), LongResetAt: now.Add(5 * 24 * time.Hour)},
 	}}
 	authID, _ := b.PickWithQuota("key", cands, quotaTestConfig(), resolver)
 	if authID != "a" {
@@ -215,8 +215,8 @@ func TestPickWithQuota_ResetWithinHourTiesToFillFirst(t *testing.T) {
 	cands := candidates("a", "b")
 	resolver := stubResolver{infos: map[string]QuotaInfo{
 		// Resets 30 minutes apart count as the same moment: fill-first decides.
-		"a": {Known: true, UsedPercent: pct(90), WeeklyResetAt: now.Add(2 * time.Hour)},
-		"b": {Known: true, UsedPercent: pct(10), WeeklyResetAt: now.Add(2*time.Hour + 30*time.Minute)},
+		"a": {Known: true, UsedPercent: pct(90), LongResetAt: now.Add(2 * time.Hour)},
+		"b": {Known: true, UsedPercent: pct(10), LongResetAt: now.Add(2*time.Hour + 30*time.Minute)},
 	}}
 	authID, _ := b.PickWithQuota("key", cands, quotaTestConfig(), resolver)
 	if authID != "a" {
@@ -229,8 +229,8 @@ func TestPickWithQuota_ResetBeyondHourNotTied(t *testing.T) {
 	now := time.Now()
 	cands := candidates("a", "b")
 	resolver := stubResolver{infos: map[string]QuotaInfo{
-		"a": {Known: true, UsedPercent: pct(10), WeeklyResetAt: now.Add(2 * time.Hour)},
-		"b": {Known: true, UsedPercent: pct(90), WeeklyResetAt: now.Add(4 * time.Hour)},
+		"a": {Known: true, UsedPercent: pct(10), LongResetAt: now.Add(2 * time.Hour)},
+		"b": {Known: true, UsedPercent: pct(90), LongResetAt: now.Add(4 * time.Hour)},
 	}}
 	authID, _ := b.PickWithQuota("key", cands, quotaTestConfig(), resolver)
 	if authID != "a" {
@@ -244,7 +244,7 @@ func TestPickWithQuota_KnownResetBeforeUnknown(t *testing.T) {
 	cands := candidates("a", "b")
 	resolver := stubResolver{infos: map[string]QuotaInfo{
 		"a": {Known: true, UsedPercent: pct(90)},
-		"b": {Known: true, UsedPercent: pct(10), WeeklyResetAt: now.Add(5 * 24 * time.Hour)},
+		"b": {Known: true, UsedPercent: pct(10), LongResetAt: now.Add(5 * 24 * time.Hour)},
 	}}
 	authID, _ := b.PickWithQuota("key", cands, quotaTestConfig(), resolver)
 	if authID != "b" {
@@ -260,11 +260,28 @@ func TestPickWithQuota_PastResetTreatedAsNow(t *testing.T) {
 		// a's window already renewed: the balancer's defensive clamp
 		// treats a stale past reset as now (production resolvers
 		// project it forward to the next window via NextReset).
-		"a": {Known: true, UsedPercent: pct(10), WeeklyResetAt: now.Add(-time.Minute)},
-		"b": {Known: true, UsedPercent: pct(90), WeeklyResetAt: now.Add(2 * time.Hour)},
+		"a": {Known: true, UsedPercent: pct(10), LongResetAt: now.Add(-time.Minute)},
+		"b": {Known: true, UsedPercent: pct(90), LongResetAt: now.Add(2 * time.Hour)},
 	}}
 	authID, _ := b.PickWithQuota("key", cands, quotaTestConfig(), resolver)
 	if authID != "a" {
 		t.Fatalf("expected already-reset profile a first, got %q", authID)
+	}
+}
+
+func TestPickWithQuota_MonthlyResetSameAsWeekly(t *testing.T) {
+	b := New()
+	now := time.Now()
+	cands := candidates("weekly", "monthly")
+	resolver := stubResolver{infos: map[string]QuotaInfo{
+		// "weekly" is on a weekly plan, "monthly" on a monthly plan; the
+		// balancer must not care which kind the long window is, only
+		// when it resets.
+		"weekly":  {Known: true, UsedPercent: pct(80), LongResetAt: now.Add(20 * 24 * time.Hour)},
+		"monthly": {Known: true, UsedPercent: pct(10), LongResetAt: now.Add(2 * 24 * time.Hour)},
+	}}
+	authID, _ := b.PickWithQuota("key", cands, quotaTestConfig(), resolver)
+	if authID != "monthly" {
+		t.Fatalf("expected sooner-reset monthly profile, got %q", authID)
 	}
 }

@@ -37,10 +37,11 @@ type QuotaInfo struct {
 	// BlockedUntil excludes the profile while it is in the future
 	// (upstream reported the quota exhausted).
 	BlockedUntil time.Time
-	// WeeklyResetAt is when the weekly (long-window) quota resets, when
-	// known from a precise snapshot. Reset-soonest profiles are preferred:
-	// quota that renews soon should be spent first.
-	WeeklyResetAt time.Time
+	// LongResetAt is when the long-window quota resets, when known from a
+	// precise snapshot. The long window is weekly or monthly, whichever
+	// the account is on; both are treated identically. Reset-soonest
+	// profiles are preferred: quota that renews soon should be spent first.
+	LongResetAt time.Time
 	// Fresh means never observed and no snapshot.
 	Fresh bool
 }
@@ -236,10 +237,10 @@ func rankCandidates(candidates []Candidate, cfg Config, resolver QuotaResolver, 
 			// quota with a distant reset. Reset moments within
 			// resetTieWindow count as the same moment and fall through
 			// to the fill-first keys below.
-			if weeklyResetLess(qa.WeeklyResetAt, qb.WeeklyResetAt, now) {
+			if longResetLess(qa.LongResetAt, qb.LongResetAt, now) {
 				return true
 			}
-			if weeklyResetLess(qb.WeeklyResetAt, qa.WeeklyResetAt, now) {
+			if longResetLess(qb.LongResetAt, qa.LongResetAt, now) {
 				return false
 			}
 			pa, pb := qa.UsedPercent != nil, qb.UsedPercent != nil
@@ -282,12 +283,13 @@ func rankCandidates(candidates []Candidate, cfg Config, resolver QuotaResolver, 
 // falls through to the fill-first keys.
 const resetTieWindow = time.Hour
 
-// weeklyResetLess reports whether profile a's weekly quota resets
-// meaningfully sooner than b's. Profiles with a known reset sort before
+// longResetLess reports whether profile a's long-window quota resets
+// meaningfully sooner than b's. The long window is weekly or monthly,
+// whichever the account is on; both sort by reset time identically. Profiles with a known reset sort before
 // profiles without one; a reset already in the past is treated as now
 // (its quota just renewed). Reset moments within resetTieWindow of each
 // other tie, so the caller falls through to the next ranking key.
-func weeklyResetLess(a, b time.Time, now time.Time) bool {
+func longResetLess(a, b time.Time, now time.Time) bool {
 	az, bz := a.IsZero(), b.IsZero()
 	if az != bz {
 		return bz
@@ -314,10 +316,10 @@ func weeklyResetLess(a, b time.Time, now time.Time) bool {
 	return a.Before(b)
 }
 
-// weeklyResetTie reports whether two weekly reset moments count as the
+// longResetTie reports whether two long-window reset moments count as the
 // same reset tier for grouping (e.g. round-robin top-tier selection).
-func weeklyResetTie(a, b time.Time, now time.Time) bool {
-	return !weeklyResetLess(a, b, now) && !weeklyResetLess(b, a, now)
+func longResetTie(a, b time.Time, now time.Time) bool {
+	return !longResetLess(a, b, now) && !longResetLess(b, a, now)
 }
 
 // roundRobinTopTier cycles through the candidates tied with the best-ranked
@@ -358,7 +360,7 @@ func sameQuotaTier(a, b QuotaInfo) bool {
 	if !a.Known {
 		return true
 	}
-	if !weeklyResetTie(a.WeeklyResetAt, b.WeeklyResetAt, time.Now()) {
+	if !longResetTie(a.LongResetAt, b.LongResetAt, time.Now()) {
 		return false
 	}
 	pa, pb := a.UsedPercent != nil, b.UsedPercent != nil

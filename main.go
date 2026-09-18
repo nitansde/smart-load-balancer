@@ -634,17 +634,18 @@ func (r *quotaResolver) Lookup(authID, provider string) balancer.QuotaInfo {
 		if snap.Long != nil && snap.Long.UsedPercent != nil {
 			info.UsedPercent = snap.Long.UsedPercent
 		}
-		// Weekly reset drives reset-soonest ordering; reset moments
-		// within an hour count as the same tier. An already-passed
-		// reset is projected forward to the next window until a fresh
-		// fetch lands.
+		// Long-window (weekly or monthly) reset drives reset-soonest
+		// ordering; reset moments within an hour count as the same
+		// tier. An already-passed reset is projected forward to the
+		// next window until a fresh fetch lands.
 		if snap.Long != nil && !snap.Long.ResetAt.IsZero() {
-			info.WeeklyResetAt = snap.Long.NextReset(now)
+			info.LongResetAt = snap.Long.NextReset(now)
 		}
-		// A weekly window reset that already passed means the snapshot
-		// numbers are stale: fetch fresh quota now instead of waiting for
-		// the next background cycle. The five-hour window is tracked
-		// locally from usage feedback, not re-fetched.
+		// A long-window (weekly or monthly) reset that already passed
+		// means the snapshot numbers are stale: fetch fresh quota now
+		// instead of waiting for the next background cycle. The
+		// five-hour window is tracked locally from usage feedback,
+		// not re-fetched.
 		if longWindowResetPassed(snap, now) {
 			refreshQuotaNow(authID)
 		}
