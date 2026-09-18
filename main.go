@@ -219,7 +219,23 @@ func callHostCallback(method string, payload any) (json.RawMessage, error) {
 	if callCode != 0 {
 		return nil, fmt.Errorf("host callback %s failed with code %d", method, int(callCode))
 	}
-	return json.RawMessage(rawResponse), nil
+	// The host wraps every callback response in an RPC envelope:
+	// {"ok":true,"result":{...}} on success, {"ok":false,"error":{...}}
+	// on failure (still with return code 0). Unwrap it here so callers
+	// decode the payload directly and callback errors are never masked
+	// as empty successful responses.
+	var env pluginabi.Envelope
+	if err := json.Unmarshal(rawResponse, &env); err != nil {
+		return nil, fmt.Errorf("decode host callback %s envelope: %w", method, err)
+	}
+	if !env.OK {
+		msg := "unknown error"
+		if env.Error != nil && env.Error.Message != "" {
+			msg = env.Error.Message
+		}
+		return nil, fmt.Errorf("host callback %s failed: %s", method, msg)
+	}
+	return json.RawMessage(env.Result), nil
 }
 
 // cgoHostClient implements quota.HostClient through host callbacks.
