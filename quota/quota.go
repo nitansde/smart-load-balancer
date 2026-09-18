@@ -152,6 +152,35 @@ func (s *Store) Set(snap Snapshot) {
 	s.m[snap.AuthID] = snap
 }
 
+// MergeSnapshot overlays the non-nil windows of partial onto the stored
+// snapshot, creating it when absent. It is how quota data harvested
+// passively from response headers (see SnapshotFromHeaders) lands in the
+// store: per-window last-write-wins, everything else is preserved.
+func (s *Store) MergeSnapshot(partial Snapshot) {
+	if partial.AuthID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cur, ok := s.m[partial.AuthID]
+	if !ok {
+		cur = Snapshot{AuthID: partial.AuthID, Provider: partial.Provider}
+	}
+	if partial.FiveHour != nil {
+		cur.FiveHour = partial.FiveHour
+	}
+	if partial.Long != nil {
+		cur.Long = partial.Long
+	}
+	if partial.PlanType != "" {
+		cur.PlanType = partial.PlanType
+	}
+	if !partial.FetchedAt.IsZero() {
+		cur.FetchedAt = partial.FetchedAt
+	}
+	s.m[partial.AuthID] = cur
+}
+
 // Remove drops the snapshot for authID.
 func (s *Store) Remove(authID string) {
 	s.mu.Lock()

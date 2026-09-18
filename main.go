@@ -520,6 +520,13 @@ func handleUsage(raw []byte) ([]byte, error) {
 		ResponseHeaders: http.Header(rec.ResponseHeaders),
 		ObservedAt:      observedAt,
 	})
+	// Harvest quota passively: every Codex request carries its profile's
+	// latest window numbers in the response headers (the host merges the
+	// upstream quota event into them). Zero extra fetches; active profiles
+	// stay calibrated from traffic alone.
+	if snap, ok := quota.SnapshotFromHeaders(rec.AuthID, rec.Provider, http.Header(rec.ResponseHeaders), observedAt); ok {
+		quotaStore.MergeSnapshot(snap)
+	}
 	return okEnvelope(struct{}{})
 }
 
