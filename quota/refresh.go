@@ -2,6 +2,7 @@ package quota
 
 import (
 	"encoding/json"
+	"math/rand"
 	"net/http"
 	"strings"
 	"sync"
@@ -19,6 +20,10 @@ const (
 	codexUserAgent     = "codex_cli_rs/0.76.0"
 
 	maxRefreshConcurrency = 2
+
+	// defaultMaxStale is the backstop refresh age: even a profile nobody
+	// used gets re-checked this often, catching quota consumed outside CPA.
+	defaultMaxStale = 6 * time.Hour
 )
 
 // usageEndpoints maps a provider to its quota endpoint. Providers without an
@@ -65,6 +70,9 @@ type Config struct {
 	// ProbeFresh sends one minimal "ping" request when a never-used long
 	// window is detected, starting its countdown.
 	ProbeFresh bool
+	// MaxStale caps how old a snapshot may get before it is re-fetched even
+	// when nothing else changed. Zero means defaultMaxStale.
+	MaxStale time.Duration
 }
 
 // Refresher periodically pulls upstream quota snapshots into a Store.
@@ -122,12 +130,14 @@ func (r *Refresher) loop() {
 	for {
 		interval := r.config().Interval
 		if interval <= 0 {
-			interval = 5 * time.Minute
+			interval = 30 * time.Minute
 		}
+		// Jitter the wait so multiple plugin instances do not burst together.
+		wait := interval + time.Duration(rand.Int63n(int64(interval)/4+1))
 		select {
 		case <-r.stop:
 			return
-		case <-time.After(interval):
+		case <-time.After(wait):
 			r.RefreshOnce()
 		}
 	}
@@ -144,9 +154,13 @@ func (r *Refresher) RefreshOnce() {
 		return
 	}
 	eligible := filterAuths(auths, cfg.Providers)
+	now := time.Now()
 	sem := make(chan struct{}, maxRefreshConcurrency)
 	var wg sync.WaitGroup
 	for _, auth := range eligible {
+		if !r.needsRefresh(auth, cfg, now) {
+			continue
+		}
 		wg.Add(1)
 		go func(a AuthEntry) {
 			defer wg.Done()
@@ -166,6 +180,33 @@ func (r *Refresher) RefreshOnce() {
 			r.store.Remove(id)
 		}
 	}
+}
+
+// needsRefresh reports whether auth's quota could have changed since its
+// last fetch. Quota numbers only move when the profile is used, when a
+// window resets, or when it is consumed outside CPA — so idle profiles are
+// left alone instead of being polled every cycle.
+func (r *Refresher) needsRefresh(auth AuthEntry, cfg Config, now time.Time) bool {
+	snap, ok := r.store.Get(auth.ID)
+	if !ok {
+		return true // never fetched
+	}
+	// Requests we routed to this profile since the snapshot moved its numbers.
+	if lastUsed, ok := r.store.LastUsed(auth.ID); ok && lastUsed.After(snap.FetchedAt) {
+		return true
+	}
+	// A window whose reset time has passed may hold fresh numbers.
+	for _, w := range []*Window{snap.FiveHour, snap.Long} {
+		if w != nil && !w.ResetAt.IsZero() && !w.ResetAt.After(now) {
+			return true
+		}
+	}
+	// Backstop: catch quota consumed outside CPA.
+	maxStale := cfg.MaxStale
+	if maxStale <= 0 {
+		maxStale = defaultMaxStale
+	}
+	return now.Sub(snap.FetchedAt) >= maxStale
 }
 
 func (r *Refresher) refreshOne(auth AuthEntry, cfg Config) {

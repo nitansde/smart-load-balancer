@@ -71,13 +71,14 @@ func (s Snapshot) Exhausted() bool {
 // Store holds the latest quota snapshot per auth ID. It is safe for
 // concurrent use.
 type Store struct {
-	mu sync.RWMutex
-	m  map[string]Snapshot
+	mu       sync.RWMutex
+	m        map[string]Snapshot
+	lastUsed map[string]time.Time
 }
 
 // NewStore returns an empty Store.
 func NewStore() *Store {
-	return &Store{m: make(map[string]Snapshot)}
+	return &Store{m: make(map[string]Snapshot), lastUsed: make(map[string]time.Time)}
 }
 
 // Get returns the snapshot for authID.
@@ -103,6 +104,25 @@ func (s *Store) Remove(authID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.m, authID)
+}
+
+// MarkUsed records that authID just served a request. The refresher uses
+// this to know whose quota numbers may have moved since the last fetch.
+func (s *Store) MarkUsed(authID string) {
+	if authID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastUsed[authID] = time.Now()
+}
+
+// LastUsed returns when authID last served a request.
+func (s *Store) LastUsed(authID string) (time.Time, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	t, ok := s.lastUsed[authID]
+	return t, ok
 }
 
 // IDs lists every auth ID with a snapshot.

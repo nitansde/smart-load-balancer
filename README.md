@@ -46,7 +46,7 @@ Once published to the official store, install from the CLIProxyAPI management UI
          max_inflight_per_profile: 8
          quota_enabled: true        # fetch real upstream quota (Codex OAuth) in the background
          quota_providers: ["codex"] # providers to fetch quota for; empty = all known
-         quota_refresh_seconds: 300 # how often quota is re-fetched (60-3600)
+         quota_refresh_seconds: 1800 # base refresh cycle; only changed profiles are re-fetched
          quota_probe_fresh: false   # send one "ping" to start a never-used weekly window
    ```
 4. Restart CLIProxyAPI.
@@ -63,7 +63,7 @@ Once published to the official store, install from the CLIProxyAPI management UI
 | `max_inflight_per_profile` | int | `8` | Recent-pick threshold above which a sticky assignment spills over to the least-loaded profile. |
 | `quota_enabled` | bool | `true` | Fetch real upstream quota (Codex OAuth) in the background via host auth callbacks. Snapshots feed quota-aware ordering. |
 | `quota_providers` | array | `[]` | Only fetch quota for these providers. Empty means every provider with a known quota endpoint. |
-| `quota_refresh_seconds` | int | `300` | How often upstream quota is re-fetched (clamped to 60-3600). |
+| `quota_refresh_seconds` | int | `1800` | Base refresh cycle (clamped to 300-7200). Each cycle only re-fetches profiles whose quota may have changed: never fetched, served requests since the last fetch, past a window reset time, or older than 6h (backstop for use outside CPA). Idle profiles are not polled. |
 | `quota_probe_fresh` | bool | `false` | When a never-used weekly window is detected, send one minimal "ping" request to start its countdown. |
 
 If no candidate matches `providers`, or no candidates are offered at all, the plugin declines the pick and the host falls back to its default scheduling — requests are never broken by this plugin.

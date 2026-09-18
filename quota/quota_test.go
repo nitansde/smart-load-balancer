@@ -265,6 +265,63 @@ func TestRefresherDisabled(t *testing.T) {
 	}
 }
 
+func TestNeedsRefresh(t *testing.T) {
+	now := time.Now()
+	auth := AuthEntry{ID: "auth-1", AuthIndex: "0", Provider: "codex"}
+	newRefresher := func(store *Store) *Refresher {
+		return NewRefresher(&fakeHostClient{}, store, testConfig)
+	}
+
+	// Never fetched -> refresh.
+	if !newRefresher(NewStore()).needsRefresh(auth, testConfig(), now) {
+		t.Error("never-fetched auth should need refresh")
+	}
+
+	// Fresh snapshot, no picks, reset in the future, young -> skip.
+	fresh := NewStore()
+	used := 10.0
+	fresh.Set(Snapshot{
+		AuthID:    "auth-1",
+		FiveHour:  &Window{Kind: WindowFiveHour, UsedPercent: &used, ResetAt: now.Add(time.Hour)},
+		Long:      &Window{Kind: WindowWeekly, UsedPercent: &used, ResetAt: now.Add(24 * time.Hour)},
+		FetchedAt: now.Add(-time.Minute),
+	})
+	if newRefresher(fresh).needsRefresh(auth, testConfig(), now) {
+		t.Error("idle fresh snapshot should not need refresh")
+	}
+
+	// Pick routed after the fetch -> refresh.
+	used2 := NewStore()
+	used2.Set(Snapshot{AuthID: "auth-1", FetchedAt: now.Add(-time.Hour)})
+	used2.MarkUsed("auth-1")
+	// MarkUsed stamps time.Now(); ensure it is after FetchedAt.
+	if !newRefresher(used2).needsRefresh(auth, testConfig(), time.Now()) {
+		t.Error("auth used after fetch should need refresh")
+	}
+
+	// Reset time passed -> refresh.
+	reset := NewStore()
+	reset.Set(Snapshot{
+		AuthID:    "auth-1",
+		Long:      &Window{Kind: WindowWeekly, UsedPercent: &used, ResetAt: now.Add(-time.Minute)},
+		FetchedAt: now.Add(-time.Hour),
+	})
+	if !newRefresher(reset).needsRefresh(auth, testConfig(), now) {
+		t.Error("auth past its reset time should need refresh")
+	}
+
+	// Older than maxStale -> refresh (backstop for external use).
+	stale := NewStore()
+	stale.Set(Snapshot{
+		AuthID:    "auth-1",
+		Long:      &Window{Kind: WindowWeekly, UsedPercent: &used, ResetAt: now.Add(24 * time.Hour)},
+		FetchedAt: now.Add(-7 * time.Hour),
+	})
+	if !newRefresher(stale).needsRefresh(auth, testConfig(), now) {
+		t.Error("snapshot older than maxStale should need refresh")
+	}
+}
+
 func TestRefresherPrunesRemovedAuths(t *testing.T) {
 	client := &fakeHostClient{
 		auths:    []AuthEntry{{ID: "auth-1", AuthIndex: "0", Provider: "codex"}},

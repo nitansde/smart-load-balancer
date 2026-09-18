@@ -110,13 +110,13 @@ func (c Config) WithDefaults() Config {
 		out.MaxInflightPerProfile = 10000
 	}
 	if out.QuotaRefreshSeconds <= 0 {
+		out.QuotaRefreshSeconds = 1800
+	}
+	if out.QuotaRefreshSeconds < 300 {
 		out.QuotaRefreshSeconds = 300
 	}
-	if out.QuotaRefreshSeconds < 60 {
-		out.QuotaRefreshSeconds = 60
-	}
-	if out.QuotaRefreshSeconds > 3600 {
-		out.QuotaRefreshSeconds = 3600
+	if out.QuotaRefreshSeconds > 7200 {
+		out.QuotaRefreshSeconds = 7200
 	}
 	quotaProviders := make([]string, 0, len(out.QuotaProviders))
 	seenQP := make(map[string]struct{}, len(out.QuotaProviders))
@@ -144,7 +144,7 @@ func DefaultConfig() Config {
 		WindowSeconds:         int(DefaultWindow / time.Second),
 		MaxInflightPerProfile: DefaultMaxInflightPerProfile,
 		QuotaEnabled:          true,
-		QuotaRefreshSeconds:   300,
+		QuotaRefreshSeconds:   1800,
 	}.WithDefaults()
 }
 

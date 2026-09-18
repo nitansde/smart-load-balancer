@@ -386,7 +386,7 @@ func pluginRegistration() registration {
 			},
 		},
 		Capabilities: registrationCapabilities{
-			Scheduler:               true,
+			Scheduler:                 true,
 			SchedulerAcrossPriorities: true,
 		},
 	}
@@ -405,6 +405,10 @@ func pickAuth(raw []byte) ([]byte, error) {
 	}
 	keyHash := balancer.ClientKeyHash(http.Header(req.Options.Headers))
 	authID, handled := loadBalancer.Pick(keyHash, candidates, cfg)
+	if handled && authID != "" {
+		// Tell the quota refresher this profile's numbers may have moved.
+		quotaStore.MarkUsed(authID)
+	}
 	return okEnvelope(pluginapi.SchedulerPickResponse{
 		AuthID:  authID,
 		Handled: handled,
