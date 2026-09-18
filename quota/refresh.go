@@ -3,7 +3,6 @@ package quota
 import (
 	"encoding/json"
 	"math/rand"
-	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -126,11 +125,18 @@ func (r *Refresher) Stop() {
 
 func (r *Refresher) loop() {
 	defer r.wg.Done()
+	cfg := r.config()
+	if cfg.Interval <= 0 {
+		// Background calibration disabled: precise quota is fetched only
+		// on demand (manual refresh through the quota provider). The
+		// usage-feedback ledger keeps working regardless.
+		return
+	}
 	r.RefreshOnce()
 	for {
 		interval := r.config().Interval
 		if interval <= 0 {
-			interval = 30 * time.Minute
+			return
 		}
 		// Jitter the wait so multiple plugin instances do not burst together.
 		wait := interval + time.Duration(rand.Int63n(int64(interval)/4+1))
@@ -210,49 +216,9 @@ func (r *Refresher) needsRefresh(auth AuthEntry, cfg Config, now time.Time) bool
 }
 
 func (r *Refresher) refreshOne(auth AuthEntry, cfg Config) {
-	endpoint, ok := usageEndpoints[strings.ToLower(auth.Provider)]
-	if !ok {
-		return
-	}
-	raw, err := r.client.GetAuthJSON(auth.AuthIndex)
-	if err != nil || len(raw) == 0 {
-		return
-	}
-	creds, err := ExtractCodexCredentials(raw)
-	if err != nil || creds.AccessToken == "" {
-		return
-	}
-	headers := map[string]string{
-		"Authorization": "Bearer " + creds.AccessToken,
-		"Content-Type":  "application/json",
-		"User-Agent":    codexUserAgent,
-	}
-	if creds.ChatGPTAccountID != "" {
-		headers["Chatgpt-Account-Id"] = creds.ChatGPTAccountID
-	}
-	resp, err := r.client.DoHTTP(HTTPRequest{Method: http.MethodGet, URL: endpoint, Headers: headers})
+	snap, err := FetchSnapshot(r.client, auth)
 	if err != nil {
 		return
-	}
-	if resp.StatusCode == http.StatusUnauthorized {
-		// Token expired between host read and use; CPA refreshes tokens in
-		// the background, so the next cycle picks up a fresh one.
-		return
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 || len(resp.Body) == 0 {
-		return
-	}
-	parsed, err := ParseUsage(resp.Body, time.Now())
-	if err != nil {
-		return
-	}
-	snap := Snapshot{
-		AuthID:    auth.ID,
-		Provider:  strings.ToLower(auth.Provider),
-		FiveHour:  parsed.FiveHour,
-		Long:      parsed.Long,
-		PlanType:  parsed.PlanType,
-		FetchedAt: time.Now(),
 	}
 	r.store.Set(snap)
 
@@ -264,32 +230,15 @@ func (r *Refresher) refreshOne(auth AuthEntry, cfg Config) {
 		}
 		r.mu.Unlock()
 		if !already {
-			r.probeFreshWindow(auth, creds)
+			if creds, err := CredentialsForAuth(r.client, auth); err == nil {
+				ProbeFreshWindow(r.client.DoHTTP, creds)
+			}
 		}
 	} else if !snap.Fresh() {
 		r.mu.Lock()
 		delete(r.probed, auth.ID)
 		r.mu.Unlock()
 	}
-}
-
-// probeFreshWindow sends one minimal request to start a never-used long
-// window's countdown. Best effort: failures just leave the window fresh.
-func (r *Refresher) probeFreshWindow(auth AuthEntry, creds Credentials) {
-	headers := map[string]string{
-		"Authorization": "Bearer " + creds.AccessToken,
-		"Content-Type":  "application/json",
-		"User-Agent":    codexUserAgent,
-	}
-	if creds.ChatGPTAccountID != "" {
-		headers["Chatgpt-Account-Id"] = creds.ChatGPTAccountID
-	}
-	_, _ = r.client.DoHTTP(HTTPRequest{
-		Method:  http.MethodPost,
-		URL:     codexProbeEndpoint,
-		Headers: headers,
-		Body:    []byte(codexProbePayload),
-	})
 }
 
 func filterAuths(auths []AuthEntry, providers []string) []AuthEntry {

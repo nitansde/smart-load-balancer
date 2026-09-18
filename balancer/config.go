@@ -26,6 +26,12 @@ const (
 	DefaultStickyTTL             = 30 * time.Minute
 	DefaultWindow                = 120 * time.Second
 	DefaultMaxInflightPerProfile = 8
+	// DefaultQuotaCalibration is the default background precise-quota
+	// calibration interval. The usage-feedback ledger is the primary
+	// quota signal and needs no polling.
+	DefaultQuotaCalibration = 72 * time.Hour
+	// MaxQuotaCalibration caps the background calibration interval.
+	MaxQuotaCalibration = 7 * 24 * time.Hour
 	// MaxPickHistory caps the sliding-window pick log so memory stays bounded
 	// under extreme request rates.
 	MaxPickHistory = 200000
@@ -59,12 +65,22 @@ type Config struct {
 	// (for example ["codex"]). Empty means every provider with a known
 	// quota endpoint.
 	QuotaProviders []string `yaml:"quota_providers"`
-	// QuotaRefreshSeconds is how often upstream quota is re-fetched.
+	// QuotaRefreshSeconds is how often precise upstream quota is re-fetched
+	// as a background calibration. The primary quota signal is the usage
+	// feedback ledger (usage.handle), which needs no polling; this only
+	// corrects drift (e.g. quota consumed outside CPA). Zero disables the
+	// background calibration entirely (pure on-demand via the management
+	// UI, which routes through this plugin's quota provider). Defaults to
+	// 72h.
 	QuotaRefreshSeconds int `yaml:"quota_refresh_seconds"`
-	// QuotaProbeFresh sends one minimal "ping" request when a never-used
-	// quota window is detected, starting that window's countdown.
-	// Defaults to false.
+	// QuotaProbeFresh sends one minimal "ping" request the first time a
+	// never-used quota window is selected, starting that window's
+	// countdown. Defaults to true.
 	QuotaProbeFresh bool `yaml:"quota_probe_fresh"`
+	// QuotaPriorities is an ordered list of auth profile IDs, most
+	// preferred first. It applies inside quota-aware ordering; profiles
+	// not listed rank after all listed ones.
+	QuotaPriorities []string `yaml:"quota_priorities"`
 }
 
 // WithDefaults returns the config with zero values replaced by defaults and
@@ -109,15 +125,21 @@ func (c Config) WithDefaults() Config {
 	if out.MaxInflightPerProfile > 10000 {
 		out.MaxInflightPerProfile = 10000
 	}
-	if out.QuotaRefreshSeconds <= 0 {
-		out.QuotaRefreshSeconds = 1800
+	// QuotaEnabled is a plain bool; like Sticky it cannot distinguish
+	// "unset" from false, so the default (true) lives in DefaultConfig.
+	// QuotaRefreshSeconds: 0 disables background calibration (on-demand
+	// only); negative means the default (72h).
+	if out.QuotaRefreshSeconds < 0 {
+		out.QuotaRefreshSeconds = int(DefaultQuotaCalibration / time.Second)
 	}
-	if out.QuotaRefreshSeconds < 300 {
-		out.QuotaRefreshSeconds = 300
+	if out.QuotaRefreshSeconds > 0 && out.QuotaRefreshSeconds < 3600 {
+		out.QuotaRefreshSeconds = 3600
 	}
-	if out.QuotaRefreshSeconds > 7200 {
-		out.QuotaRefreshSeconds = 7200
+	if out.QuotaRefreshSeconds > int(MaxQuotaCalibration/time.Second) {
+		out.QuotaRefreshSeconds = int(MaxQuotaCalibration / time.Second)
 	}
+	// QuotaProbeFresh defaults to true; like Sticky the default lives in
+	// DefaultConfig because YAML cannot distinguish unset from false.
 	quotaProviders := make([]string, 0, len(out.QuotaProviders))
 	seenQP := make(map[string]struct{}, len(out.QuotaProviders))
 	for _, p := range out.QuotaProviders {
@@ -144,7 +166,8 @@ func DefaultConfig() Config {
 		WindowSeconds:         int(DefaultWindow / time.Second),
 		MaxInflightPerProfile: DefaultMaxInflightPerProfile,
 		QuotaEnabled:          true,
-		QuotaRefreshSeconds:   1800,
+		QuotaRefreshSeconds:   int(DefaultQuotaCalibration / time.Second),
+		QuotaProbeFresh:       true,
 	}.WithDefaults()
 }
 

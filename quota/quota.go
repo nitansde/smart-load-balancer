@@ -9,9 +9,16 @@
 package quota
 
 import (
+	"strings"
 	"sync"
 	"time"
 )
+
+// HasEndpoint reports whether the quota package can fetch precise upstream
+// quota for the given provider key.
+func HasEndpoint(provider string) bool {
+	return strings.EqualFold(strings.TrimSpace(provider), "codex")
+}
 
 // WindowKind identifies a quota window reported by the upstream usage API.
 type WindowKind string
@@ -66,6 +73,21 @@ func (s Snapshot) LongUsedPercent() float64 {
 func (s Snapshot) Exhausted() bool {
 	return (s.FiveHour != nil && s.FiveHour.Exhausted) ||
 		(s.Long != nil && s.Long.Exhausted)
+}
+
+// EarliestReset returns the earliest known window reset time, or the zero
+// time when no window reports one.
+func (s Snapshot) EarliestReset() time.Time {
+	var earliest time.Time
+	for _, w := range []*Window{s.FiveHour, s.Long} {
+		if w == nil || w.ResetAt.IsZero() {
+			continue
+		}
+		if earliest.IsZero() || w.ResetAt.Before(earliest) {
+			earliest = w.ResetAt
+		}
+	}
+	return earliest
 }
 
 // Store holds the latest quota snapshot per auth ID. It is safe for

@@ -44,10 +44,11 @@ Once published to the official store, install from the CLIProxyAPI management UI
          sticky_ttl_seconds: 1800
          window_seconds: 120
          max_inflight_per_profile: 8
-         quota_enabled: true        # fetch real upstream quota (Codex OAuth) in the background
-         quota_providers: ["codex"] # providers to fetch quota for; empty = all known
-         quota_refresh_seconds: 1800 # base refresh cycle; only changed profiles are re-fetched
-         quota_probe_fresh: false   # send one "ping" to start a never-used weekly window
+         quota_enabled: true        # quota-aware ordering via usage feedback (no polling)
+         quota_providers: ["codex"] # providers with a known quota endpoint; empty = all known
+         quota_refresh_seconds: 0   # 0 = no background calibration (on-demand/manual only); default 72h
+         quota_probe_fresh: true    # send one "ping" when a never-used profile is first picked, starting its weekly window
+         quota_priorities: []       # ordered auth profile IDs, most preferred first; unlisted rank last
    ```
 4. Restart CLIProxyAPI.
 
@@ -61,16 +62,33 @@ Once published to the official store, install from the CLIProxyAPI management UI
 | `sticky_ttl_seconds` | int | `1800` | How long an idle sticky assignment is kept. |
 | `window_seconds` | int | `120` | Sliding window used to estimate recent load per profile. |
 | `max_inflight_per_profile` | int | `8` | Recent-pick threshold above which a sticky assignment spills over to the least-loaded profile. |
-| `quota_enabled` | bool | `true` | Fetch real upstream quota (Codex OAuth) in the background via host auth callbacks. Snapshots feed quota-aware ordering. |
-| `quota_providers` | array | `[]` | Only fetch quota for these providers. Empty means every provider with a known quota endpoint. |
-| `quota_refresh_seconds` | int | `1800` | Base refresh cycle (clamped to 300-7200). Each cycle only re-fetches profiles whose quota may have changed: never fetched, served requests since the last fetch, past a window reset time, or older than 6h (backstop for use outside CPA). Idle profiles are not polled. |
-| `quota_probe_fresh` | bool | `false` | When a never-used weekly window is detected, send one minimal "ping" request to start its countdown. |
+| `quota_enabled` | bool | `true` | Quota-aware ordering. Primary signal is the usage-feedback ledger (see below); precise upstream snapshots are only used for calibration. |
+| `quota_providers` | array | `[]` | Only consider precise quota for these providers. Empty means every provider with a known quota endpoint. |
+| `quota_refresh_seconds` | int | `259200` (72h) | Background precise-quota calibration interval. `0` disables background calibration entirely: quotas are then refreshed only on demand (manual refresh in the management UI, which routes through this plugin's `quota.fetch`). Kept deliberately infrequent to avoid upstream rate-limit risk. |
+| `quota_probe_fresh` | bool | `true` | When a never-used profile is picked for the first time, send one minimal ping to start its weekly window countdown. |
+| `quota_priorities` | array | `[]` | Ordered auth profile IDs, most preferred first. Applies inside quota-aware ordering; unlisted profiles rank last. |
 
 If no candidate matches `providers`, or no candidates are offered at all, the plugin declines the pick and the host falls back to its default scheduling — requests are never broken by this plugin.
 
+## How quota-aware scheduling works
+
+The plugin registers three capabilities: `scheduler`, `usage_plugin`, and `quota_provider`.
+
+**Usage feedback is the primary quota signal — no polling.** After every request the host calls `usage.handle` with a usage record. The plugin keeps a per-profile ledger: successful requests accumulate consumed tokens, and upstream `429` failures are classified:
+
+- an explicit weekly/monthly exhaustion signal blocks the profile until the estimated window end;
+- a quota failure that names no window backs off 5 hours, then retries;
+- a clearly transient rate limit (e.g. concurrency) does not block at all.
+
+A profile never scheduled through this plugin is assumed at 100% remaining; the scheduler owns all routing, so its own ledger is authoritative and drift is corrected by calibration.
+
+**Fill-first ordering.** On each pick, blocked profiles are excluded first. A client's sticky profile is kept while it stays healthy (prompt-cache affinity); on exhaustion the client fails over. Fresh selection ranks profiles: your `quota_priorities` order first, then known-before-unknown, then fill-first (highest precise `used_percent`, else highest ledger-consumed tokens, never-used last), then host priority tier (higher first, mirroring CPA's default scheduler), then fewest other clients' sticky claims, then least recent load with a deterministic per-key tie-break so different client keys spread instead of colliding.
+
+**Precise quota is on-demand calibration.** The plugin implements the `quota_provider` capability, so when you manually refresh a credential's quota in the management UI, the host calls this plugin's `quota.fetch` — which updates the scheduler's snapshot store as a side effect. One code path, never duplicated work. Background calibration defaults to every 72h and can be turned off entirely (`quota_refresh_seconds: 0`) if you only want manual refreshes.
+
 ## How it works
 
-The plugin implements the `scheduler.pick` capability. On each pick the host offers the eligible auth candidates plus the inbound request headers; the plugin returns the chosen auth id. Load is estimated from the plugin's own recent picks inside `window_seconds` (self-healing: no cross-request bookkeeping can leak, and a restart simply starts with a clean slate).
+The plugin implements the `scheduler.pick` capability. On each pick the host offers the eligible auth candidates (with their host priority tier and status) plus the inbound request headers; the plugin returns the chosen auth id. Load is estimated from the plugin's own recent picks inside `window_seconds` (self-healing: no cross-request bookkeeping can leak, and a restart simply starts with a clean slate).
 
 ## Development
 

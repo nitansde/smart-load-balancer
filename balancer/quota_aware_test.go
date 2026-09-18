@@ -1,0 +1,180 @@
+package balancer
+
+import (
+	"testing"
+	"time"
+)
+
+type stubResolver struct {
+	infos map[string]QuotaInfo
+}
+
+func (s stubResolver) Lookup(authID, provider string) QuotaInfo {
+	if qi, ok := s.infos[authID]; ok {
+		return qi
+	}
+	return QuotaInfo{}
+}
+
+func pct(p float64) *float64 { return &p }
+
+func candidates(ids ...string) []Candidate {
+	out := make([]Candidate, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, Candidate{ID: id, Provider: "codex"})
+	}
+	return out
+}
+
+func quotaTestConfig() Config {
+	return Config{
+		Sticky: false, Strategy: StrategyLeastConnections,
+		WindowSeconds: 60, MaxInflightPerProfile: 3,
+	}.WithDefaults()
+}
+
+func TestPickWithQuota_PriorityHigherFirst(t *testing.T) {
+	b := New()
+	cands := []Candidate{
+		{ID: "low", Provider: "codex", Priority: 1},
+		{ID: "high", Provider: "codex", Priority: 10},
+		{ID: "mid", Provider: "codex", Priority: 5},
+	}
+	authID, ok := b.PickWithQuota("key", cands, quotaTestConfig(), stubResolver{})
+	if !ok || authID != "high" {
+		t.Fatalf("expected high priority profile, got %q (ok=%v)", authID, ok)
+	}
+}
+
+func TestPickWithQuota_FillFirstBySnapshot(t *testing.T) {
+	b := New()
+	cands := candidates("a", "b", "c")
+	resolver := stubResolver{infos: map[string]QuotaInfo{
+		"a": {Known: true, UsedPercent: pct(20)},
+		"b": {Known: true, UsedPercent: pct(80)},
+		"c": {Known: true, UsedPercent: pct(50)},
+	}}
+	authID, ok := b.PickWithQuota("key", cands, quotaTestConfig(), resolver)
+	if !ok || authID != "b" {
+		t.Fatalf("expected most-used profile b, got %q (ok=%v)", authID, ok)
+	}
+}
+
+func TestPickWithQuota_LedgerConsumedTokensFillFirst(t *testing.T) {
+	b := New()
+	cands := candidates("a", "b")
+	resolver := stubResolver{infos: map[string]QuotaInfo{
+		"a": {Known: true, ConsumedTokens: 100},
+		"b": {Known: true, ConsumedTokens: 9000},
+	}}
+	authID, _ := b.PickWithQuota("key", cands, quotaTestConfig(), resolver)
+	if authID != "b" {
+		t.Fatalf("expected higher-consumed profile b, got %q", authID)
+	}
+}
+
+func TestPickWithQuota_FreshLast(t *testing.T) {
+	b := New()
+	cands := candidates("used", "fresh")
+	resolver := stubResolver{infos: map[string]QuotaInfo{
+		"used":  {Known: true, ConsumedTokens: 500},
+		"fresh": {Known: true, Fresh: true},
+	}}
+	authID, _ := b.PickWithQuota("key", cands, quotaTestConfig(), resolver)
+	if authID != "used" {
+		t.Fatalf("expected used profile before fresh one, got %q", authID)
+	}
+}
+
+func TestPickWithQuota_BlockedExcluded(t *testing.T) {
+	b := New()
+	cands := candidates("blocked", "open")
+	resolver := stubResolver{infos: map[string]QuotaInfo{
+		"blocked": {Known: true, ConsumedTokens: 99999, BlockedUntil: time.Now().Add(time.Hour)},
+		"open":    {Known: true, ConsumedTokens: 10},
+	}}
+	authID, ok := b.PickWithQuota("key", cands, quotaTestConfig(), resolver)
+	if !ok || authID != "open" {
+		t.Fatalf("expected open profile, got %q (ok=%v)", authID, ok)
+	}
+}
+
+func TestPickWithQuota_AllBlockedDeclines(t *testing.T) {
+	b := New()
+	cands := candidates("a", "b")
+	resolver := stubResolver{infos: map[string]QuotaInfo{
+		"a": {Known: true, BlockedUntil: time.Now().Add(time.Hour)},
+		"b": {Known: true, BlockedUntil: time.Now().Add(time.Hour)},
+	}}
+	if _, ok := b.PickWithQuota("key", cands, quotaTestConfig(), resolver); ok {
+		t.Fatal("expected balancer to decline when all candidates blocked")
+	}
+}
+
+func TestPickWithQuota_StickyOwnerAvoidance(t *testing.T) {
+	b := New()
+	cfg := quotaTestConfig()
+	cfg.Sticky = true
+	cands := candidates("x", "y", "z")
+	// Other client keys claimed x and y, leaving z unclaimed.
+	for _, key := range []string{"k1", "k2"} {
+		for _, id := range []string{"x", "y"} {
+			b.mu.Lock()
+			b.sticky[key+id] = stickyEntry{authID: id, lastUsed: b.now()}
+			b.mu.Unlock()
+		}
+	}
+	authID, _ := b.PickWithQuota("newkey", cands, cfg, stubResolver{})
+	if authID != "z" {
+		t.Fatalf("expected unclaimed profile z, got %q", authID)
+	}
+}
+
+func TestPickWithQuota_StickyFailoverOnExhaustion(t *testing.T) {
+	b := New()
+	cfg := quotaTestConfig()
+	cfg.Sticky = true
+	cands := candidates("a", "b")
+
+	// First pick sticks to a (both unused: priority equal, loads equal,
+	// tie-break decides; run enough to observe).
+	first, _ := b.PickWithQuota("key", cands, cfg, stubResolver{})
+	second, _ := b.PickWithQuota("key", cands, cfg, stubResolver{})
+	if first != second {
+		t.Fatalf("expected sticky to keep profile, got %q then %q", first, second)
+	}
+
+	// Now the sticky profile is exhausted: fail over to the other one.
+	resolver := stubResolver{infos: map[string]QuotaInfo{
+		first: {Known: true, BlockedUntil: time.Now().Add(time.Hour)},
+	}}
+	third, ok := b.PickWithQuota("key", cands, cfg, resolver)
+	if !ok || third == first {
+		t.Fatalf("expected failover from %q, got %q (ok=%v)", first, third, ok)
+	}
+}
+
+func TestPickWithQuota_UserPrioritiesFirst(t *testing.T) {
+	b := New()
+	cfg := quotaTestConfig()
+	cfg.QuotaPriorities = []string{"b", "a"}
+	cands := candidates("a", "b", "c")
+	// Even though all are unknown, user priorities put b before a before c.
+	authID, _ := b.PickWithQuota("key", cands, cfg, stubResolver{})
+	if authID != "b" {
+		t.Fatalf("expected user-prioritized profile b, got %q", authID)
+	}
+}
+
+func TestPickWithQuota_NilResolverKeepsOldBehavior(t *testing.T) {
+	b := New()
+	cands := candidates("a", "b")
+	first, ok := b.Pick("key", cands, quotaTestConfig())
+	if !ok {
+		t.Fatal("expected pick to succeed without resolver")
+	}
+	second, _ := b.Pick("key2", cands, quotaTestConfig())
+	if first == second {
+		t.Fatal("expected deterministic tie-break to spread different keys")
+	}
+}

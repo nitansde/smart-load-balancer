@@ -9,16 +9,42 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
-
-	"github.com/nitansde/smart-load-balancer/quota"
 )
 
 // Candidate is one upstream auth profile offered by the host for a pick.
 type Candidate struct {
 	ID       string
 	Provider string
+	// Priority is the host priority tier. Higher wins, matching CPA's
+	// default scheduler which serves higher priority numbers first.
+	Priority int
+	// Status is the host-visible auth status.
+	Status string
+}
+
+// QuotaInfo is the quota view of one profile used for pick ordering.
+type QuotaInfo struct {
+	// UsedPercent is the precise upstream usage (0-100) when a snapshot
+	// exists (e.g. fetched on demand through the quota provider).
+	UsedPercent *float64
+	// ConsumedTokens is the estimated consumption from usage feedback.
+	ConsumedTokens int64
+	// Known means the profile takes part in quota-aware ordering: it has
+	// a snapshot, a usage ledger entry, or belongs to a provider with a
+	// known quota endpoint (a never-used profile is 100% remaining).
+	Known bool
+	// BlockedUntil excludes the profile while it is in the future
+	// (upstream reported the quota exhausted).
+	BlockedUntil time.Time
+	// Fresh means never observed and no snapshot.
+	Fresh bool
+}
+
+// QuotaResolver supplies quota info per profile. A nil resolver reports
+// zero QuotaInfo for every profile.
+type QuotaResolver interface {
+	Lookup(authID, provider string) QuotaInfo
 }
 
 // pickRecord remembers a routing decision inside the sliding window.
@@ -41,29 +67,6 @@ type Balancer struct {
 	picks    []pickRecord
 	sticky   map[string]stickyEntry
 	rrCursor uint64
-	// quotaStore holds upstream quota snapshots when the host-backed
-	// refresher is running; nil until SetQuotaStore is called.
-	quotaStore atomic.Pointer[quota.Store]
-}
-
-// SetQuotaStore attaches the upstream quota snapshot store. The pick
-// algorithm consults it when present; a nil store disables quota-aware
-// ordering.
-func (b *Balancer) SetQuotaStore(s *quota.Store) {
-	if s == nil {
-		return
-	}
-	b.quotaStore.Store(s)
-}
-
-// QuotaSnapshot returns the latest upstream quota snapshot for authID, if
-// the quota store is attached and has one.
-func (b *Balancer) QuotaSnapshot(authID string) (quota.Snapshot, bool) {
-	store := b.quotaStore.Load()
-	if store == nil {
-		return quota.Snapshot{}, false
-	}
-	return store.Get(authID)
 }
 
 // New returns a Balancer using the real clock.
@@ -116,8 +119,39 @@ func firstHeaderValue(headers http.Header, name string) string {
 // when the balancer declines to decide so the host falls back to its default
 // scheduling.
 func (b *Balancer) Pick(keyHash string, candidates []Candidate, cfg Config) (string, bool) {
+	return b.PickWithQuota(keyHash, candidates, cfg, nil)
+}
+
+// PickWithQuota is Pick with quota-aware ordering. The resolver supplies
+// per-profile quota info; a nil resolver disables quota awareness.
+//
+// Ordering:
+//  1. Profiles the upstream marked exhausted (blocked) are excluded.
+//  2. Sticky fast path: keep the client's profile while it stays eligible
+//     and below the spillover threshold, so prompt caches stay warm.
+//  3. Fresh selection, ranked:
+//     a. user quota_priorities order (unlisted last),
+//     b. quota-known profiles before unknown ones,
+//     c. known: precise snapshot (used% desc) before estimated
+//     (consumed tokens desc; never-used last),
+//     d. unknown: host priority tier, higher first (CPA's direction),
+//     e. fewest sticky owners first (avoid profiles other keys claimed),
+//     f. strategy tie-break: least-connections prefers the lowest recent
+//     load; round-robin cycles through the top tier in ID order.
+func (b *Balancer) PickWithQuota(keyHash string, candidates []Candidate, cfg Config, resolver QuotaResolver) (string, bool) {
 	cfg = cfg.WithDefaults()
+	now := b.now()
 	eligible := filterCandidates(candidates, cfg.Providers)
+	if resolver != nil {
+		kept := make([]Candidate, 0, len(eligible))
+		for _, c := range eligible {
+			if qi := resolver.Lookup(c.ID, c.Provider); qi.BlockedUntil.After(now) {
+				continue
+			}
+			kept = append(kept, c)
+		}
+		eligible = kept
+	}
 	if len(eligible) == 0 {
 		return "", false
 	}
@@ -126,7 +160,6 @@ func (b *Balancer) Pick(keyHash string, candidates []Candidate, cfg Config) (str
 		return eligible[0].ID, true
 	}
 
-	now := b.now()
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.pruneLocked(now, cfg)
@@ -135,9 +168,12 @@ func (b *Balancer) Pick(keyHash string, candidates []Candidate, cfg Config) (str
 	for _, rec := range b.picks {
 		loads[rec.authID]++
 	}
+	owners := make(map[string]int, len(eligible))
+	for _, entry := range b.sticky {
+		owners[entry.authID]++
+	}
 
-	// Sticky fast path: keep the client's profile while it stays eligible and
-	// below the spillover threshold, so prompt caches stay warm.
+	// Sticky fast path.
 	if cfg.Sticky && keyHash != "" {
 		if entry, ok := b.sticky[keyHash]; ok && now.Sub(entry.lastUsed) <= cfg.StickyTTL() {
 			if containsCandidate(eligible, entry.authID) && loads[entry.authID] < cfg.MaxInflightPerProfile {
@@ -147,16 +183,131 @@ func (b *Balancer) Pick(keyHash string, candidates []Candidate, cfg Config) (str
 		}
 	}
 
+	ranked := rankCandidates(eligible, cfg, resolver, keyHash, loads, owners)
 	var chosen string
-	switch cfg.Strategy {
-	case StrategyRoundRobin:
-		chosen = roundRobinPick(eligible, b.rrCursor)
+	if cfg.Strategy == StrategyRoundRobin {
+		chosen = roundRobinTopTier(ranked, cfg, resolver, b.rrCursor)
 		b.rrCursor++
-	default:
-		chosen = leastConnectionsPick(eligible, loads, keyHash)
+	} else {
+		chosen = ranked[0].ID
 	}
 	b.recordLocked(chosen, keyHash, now, cfg)
 	return chosen, true
+}
+
+// userRank returns the position of authID in cfg.QuotaPriorities; unlisted
+// profiles sort after all listed ones.
+func userRank(priorities []string, authID string) int {
+	for i, id := range priorities {
+		if id == authID {
+			return i
+		}
+	}
+	return len(priorities) + 1<<30
+}
+
+// rankCandidates sorts candidates for fresh selection. The order is stable
+// and deterministic for a fixed keyHash.
+func rankCandidates(candidates []Candidate, cfg Config, resolver QuotaResolver, keyHash string, loads, owners map[string]int) []Candidate {
+	infos := make(map[string]QuotaInfo, len(candidates))
+	if resolver != nil {
+		for _, c := range candidates {
+			infos[c.ID] = resolver.Lookup(c.ID, c.Provider)
+		}
+	}
+	ranked := make([]Candidate, len(candidates))
+	copy(ranked, candidates)
+	sort.SliceStable(ranked, func(i, j int) bool {
+		a, bq := ranked[i], ranked[j]
+		if ra, rb := userRank(cfg.QuotaPriorities, a.ID), userRank(cfg.QuotaPriorities, bq.ID); ra != rb {
+			return ra < rb
+		}
+		qa, qb := infos[a.ID], infos[bq.ID]
+		if qa.Known != qb.Known {
+			return qa.Known
+		}
+		if qa.Known {
+			pa, pb := qa.UsedPercent != nil, qb.UsedPercent != nil
+			if pa != pb {
+				return pa
+			}
+			if pa {
+				if *qa.UsedPercent != *qb.UsedPercent {
+					// Fill-first: most-used (least remaining) first.
+					return *qa.UsedPercent > *qb.UsedPercent
+				}
+			} else if qa.ConsumedTokens != qb.ConsumedTokens {
+				return qa.ConsumedTokens > qb.ConsumedTokens
+			}
+		} else if a.Priority != bq.Priority {
+			// Unknown-quota profiles follow the host priority tiers,
+			// higher first, mirroring CPA's default scheduler.
+			return a.Priority > bq.Priority
+		}
+		// Avoid profiles already claimed by other client keys.
+		if owners[a.ID] != owners[bq.ID] {
+			return owners[a.ID] < owners[bq.ID]
+		}
+		if cfg.Strategy == StrategyRoundRobin {
+			return a.ID < bq.ID
+		}
+		if loads[a.ID] != loads[bq.ID] {
+			return loads[a.ID] < loads[bq.ID]
+		}
+		if ta, tb := tieBreak(keyHash, a.ID), tieBreak(keyHash, bq.ID); ta != tb {
+			return ta < tb
+		}
+		return a.ID < bq.ID
+	})
+	return ranked
+}
+
+// roundRobinTopTier cycles through the candidates tied with the best-ranked
+// one on every key above the strategy tie-break, in ID order.
+func roundRobinTopTier(ranked []Candidate, cfg Config, resolver QuotaResolver, cursor uint64) string {
+	if len(ranked) == 0 {
+		return ""
+	}
+	top := ranked[:1]
+	best := ranked[0]
+	bestRank, bestInfo := userRank(cfg.QuotaPriorities, best.ID), lookupInfo(resolver, best)
+	for _, c := range ranked[1:] {
+		if userRank(cfg.QuotaPriorities, c.ID) != bestRank {
+			break
+		}
+		qi := lookupInfo(resolver, c)
+		if !sameQuotaTier(bestInfo, qi) || (!bestInfo.Known && c.Priority != best.Priority) {
+			break
+		}
+		top = append(top, c)
+	}
+	return top[cursor%uint64(len(top))].ID
+}
+
+func lookupInfo(resolver QuotaResolver, c Candidate) QuotaInfo {
+	if resolver == nil {
+		return QuotaInfo{}
+	}
+	return resolver.Lookup(c.ID, c.Provider)
+}
+
+// sameQuotaTier reports whether two quota infos tie on every ranking key
+// above the strategy tie-break.
+func sameQuotaTier(a, b QuotaInfo) bool {
+	if a.Known != b.Known {
+		return false
+	}
+	if !a.Known {
+		return true
+	}
+	pa, pb := a.UsedPercent != nil, b.UsedPercent != nil
+	if pa != pb {
+		return false
+	}
+	if pa {
+		return *a.UsedPercent == *b.UsedPercent
+	}
+	return a.ConsumedTokens == b.ConsumedTokens
 }
 
 // Reset clears all balancer state. Used by tests.
@@ -261,31 +412,6 @@ func containsCandidate(candidates []Candidate, id string) bool {
 		}
 	}
 	return false
-}
-
-// leastConnectionsPick returns the candidate with the fewest recent picks.
-// Ties are broken by a deterministic hash of (keyHash, candidateID) so that
-// different client keys spread across profiles instead of colliding on the
-// same one, while the same key stays stable when nothing else changed.
-func leastConnectionsPick(candidates []Candidate, loads map[string]int, keyHash string) string {
-	best := candidates[0]
-	bestLoad := loads[best.ID]
-	bestTie := tieBreak(keyHash, best.ID)
-	for _, c := range candidates[1:] {
-		load := loads[c.ID]
-		tie := tieBreak(keyHash, c.ID)
-		if load < bestLoad || (load == bestLoad && tie < bestTie) {
-			best, bestLoad, bestTie = c, load, tie
-		}
-	}
-	return best.ID
-}
-
-func roundRobinPick(candidates []Candidate, cursor uint64) string {
-	sorted := make([]Candidate, len(candidates))
-	copy(sorted, candidates)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
-	return sorted[cursor%uint64(len(sorted))].ID
 }
 
 func tieBreak(keyHash, candidateID string) uint64 {
