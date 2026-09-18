@@ -37,6 +37,10 @@ type QuotaInfo struct {
 	// BlockedUntil excludes the profile while it is in the future
 	// (upstream reported the quota exhausted).
 	BlockedUntil time.Time
+	// WeeklyResetAt is when the weekly (long-window) quota resets, when
+	// known from a precise snapshot. Reset-soonest profiles are preferred:
+	// quota that renews soon should be spent first.
+	WeeklyResetAt time.Time
 	// Fresh means never observed and no snapshot.
 	Fresh bool
 }
@@ -215,6 +219,7 @@ func rankCandidates(candidates []Candidate, cfg Config, resolver QuotaResolver, 
 			infos[c.ID] = resolver.Lookup(c.ID, c.Provider)
 		}
 	}
+	now := time.Now()
 	ranked := make([]Candidate, len(candidates))
 	copy(ranked, candidates)
 	sort.SliceStable(ranked, func(i, j int) bool {
@@ -227,6 +232,16 @@ func rankCandidates(candidates []Candidate, cfg Config, resolver QuotaResolver, 
 			return qa.Known
 		}
 		if qa.Known {
+			// Reset-soonest first: spend quota that renews soon before
+			// quota with a distant reset. Reset moments within
+			// resetTieWindow count as the same moment and fall through
+			// to the fill-first keys below.
+			if weeklyResetLess(qa.WeeklyResetAt, qb.WeeklyResetAt, now) {
+				return true
+			}
+			if weeklyResetLess(qb.WeeklyResetAt, qa.WeeklyResetAt, now) {
+				return false
+			}
 			pa, pb := qa.UsedPercent != nil, qb.UsedPercent != nil
 			if pa != pb {
 				return pa
@@ -260,6 +275,46 @@ func rankCandidates(candidates []Candidate, cfg Config, resolver QuotaResolver, 
 		return a.ID < bq.ID
 	})
 	return ranked
+}
+
+// resetTieWindow is the tolerance within which two weekly reset moments
+// count as the same reset: the scheduler treats them as one tier and
+// falls through to the fill-first keys.
+const resetTieWindow = time.Hour
+
+// weeklyResetLess reports whether profile a's weekly quota resets
+// meaningfully sooner than b's. Profiles with a known reset sort before
+// profiles without one; a reset already in the past is treated as now
+// (its quota just renewed). Reset moments within resetTieWindow of each
+// other tie, so the caller falls through to the next ranking key.
+func weeklyResetLess(a, b time.Time, now time.Time) bool {
+	az, bz := a.IsZero(), b.IsZero()
+	if az != bz {
+		return bz
+	}
+	if az {
+		return false
+	}
+	if a.Before(now) {
+		a = now
+	}
+	if b.Before(now) {
+		b = now
+	}
+	d := a.Sub(b)
+	if d < 0 {
+		d = -d
+	}
+	if d <= resetTieWindow {
+		return false
+	}
+	return a.Before(b)
+}
+
+// weeklyResetTie reports whether two weekly reset moments count as the
+// same reset tier for grouping (e.g. round-robin top-tier selection).
+func weeklyResetTie(a, b time.Time, now time.Time) bool {
+	return !weeklyResetLess(a, b, now) && !weeklyResetLess(b, a, now)
 }
 
 // roundRobinTopTier cycles through the candidates tied with the best-ranked
@@ -299,6 +354,9 @@ func sameQuotaTier(a, b QuotaInfo) bool {
 	}
 	if !a.Known {
 		return true
+	}
+	if !weeklyResetTie(a.WeeklyResetAt, b.WeeklyResetAt, time.Now()) {
+		return false
 	}
 	pa, pb := a.UsedPercent != nil, b.UsedPercent != nil
 	if pa != pb {
