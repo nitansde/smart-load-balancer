@@ -628,9 +628,10 @@ func (r *quotaResolver) Lookup(authID, provider string) balancer.QuotaInfo {
 			info.UsedPercent = snap.Long.UsedPercent
 		}
 		// Weekly reset drives reset-soonest ordering; reset moments
-		// within an hour count as the same tier.
+		// within an hour count as the same tier. An already-passed
+		// reset is projected forward to the next window.
 		if snap.Long != nil && !snap.Long.ResetAt.IsZero() {
-			info.WeeklyResetAt = snap.Long.ResetAt
+			info.WeeklyResetAt = snap.Long.NextReset(now)
 		}
 		if snap.Exhausted() {
 			// A precise snapshot reporting exhaustion blocks the profile

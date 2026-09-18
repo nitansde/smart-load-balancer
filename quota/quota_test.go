@@ -336,3 +336,44 @@ func TestRefresherPrunesRemovedAuths(t *testing.T) {
 		t.Error("snapshot for removed auth should be pruned")
 	}
 }
+
+func TestWindowNextReset(t *testing.T) {
+	now := time.Now()
+
+	// Future reset passes through untouched.
+	w := Window{Kind: WindowWeekly, ResetAt: now.Add(3 * 24 * time.Hour)}
+	if got := w.NextReset(now); !got.Equal(w.ResetAt) {
+		t.Fatalf("future reset changed: %v", got)
+	}
+
+	// Zero reset stays zero.
+	if got := (Window{Kind: WindowWeekly}).NextReset(now); !got.IsZero() {
+		t.Fatalf("zero reset changed: %v", got)
+	}
+
+	// Weekly reset 1 day ago rolls forward to 6 days from now.
+	w = Window{Kind: WindowWeekly, ResetAt: now.Add(-24 * time.Hour)}
+	if got := w.NextReset(now); got.Before(now) || got.After(now.Add(6*24*time.Hour+time.Minute)) {
+		t.Fatalf("weekly roll-forward wrong: %v", got)
+	} else {
+		want := now.Add(6 * 24 * time.Hour)
+		if got.Sub(want) > time.Minute || want.Sub(got) > time.Minute {
+			t.Fatalf("weekly roll-forward = %v, want ~%v", got, want)
+		}
+	}
+
+	// Very stale reset rolls forward by multiple periods.
+	w = Window{Kind: WindowWeekly, ResetAt: now.Add(-20 * 24 * time.Hour)}
+	got := w.NextReset(now)
+	if got.Before(now) || got.After(now.Add(7*24*time.Hour)) {
+		t.Fatalf("multi-period roll-forward wrong: %v", got)
+	}
+
+	// Monthly uses a 30-day period.
+	w = Window{Kind: WindowMonthly, ResetAt: now.Add(-10 * 24 * time.Hour)}
+	got = w.NextReset(now)
+	want := now.Add(20 * 24 * time.Hour)
+	if got.Sub(want) > time.Minute || want.Sub(got) > time.Minute {
+		t.Fatalf("monthly roll-forward = %v, want ~%v", got, want)
+	}
+}

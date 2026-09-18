@@ -257,8 +257,10 @@ func TestPickWithQuota_PastResetTreatedAsNow(t *testing.T) {
 	now := time.Now()
 	cands := candidates("a", "b")
 	resolver := stubResolver{infos: map[string]QuotaInfo{
-		// a's window already renewed (stale snapshot): preferred.
-		"a": {Known: true, UsedPercent: pct(10), WeeklyResetAt: now.Add(-24 * time.Hour)},
+		// a's window already renewed: the balancer's defensive clamp
+		// treats a stale past reset as now (production resolvers
+		// project it forward to the next window via NextReset).
+		"a": {Known: true, UsedPercent: pct(10), WeeklyResetAt: now.Add(-time.Minute)},
 		"b": {Known: true, UsedPercent: pct(90), WeeklyResetAt: now.Add(2 * time.Hour)},
 	}}
 	authID, _ := b.PickWithQuota("key", cands, quotaTestConfig(), resolver)

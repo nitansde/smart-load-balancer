@@ -295,6 +295,9 @@ func weeklyResetLess(a, b time.Time, now time.Time) bool {
 	if az {
 		return false
 	}
+	// Defensive: the resolver normally projects past resets forward to
+	// the next window already; clamp here so a stale time can't win
+	// outright.
 	if a.Before(now) {
 		a = now
 	}

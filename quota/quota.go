@@ -40,6 +40,37 @@ type Window struct {
 	Exhausted bool
 }
 
+// windowPeriod is the nominal length of a quota window, used to project
+// the next reset when a snapshot's ResetAt has already passed (the window
+// renewed but the snapshot hasn't been refreshed yet). Monthly windows
+// vary between 28 and 31 days; 30 days is close enough for ordering.
+func (w Window) windowPeriod() time.Duration {
+	switch w.Kind {
+	case WindowFiveHour:
+		return 5 * time.Hour
+	case WindowMonthly:
+		return 30 * 24 * time.Hour
+	default:
+		return 7 * 24 * time.Hour
+	}
+}
+
+// NextReset returns the next reset time at or after now. A ResetAt that
+// already passed is rolled forward by whole window periods, so the
+// scheduler orders an already-renewed profile by its upcoming reset
+// instead of treating it as "due now". Zero ResetAt stays zero.
+func (w Window) NextReset(now time.Time) time.Time {
+	if w.ResetAt.IsZero() || !w.ResetAt.Before(now) {
+		return w.ResetAt
+	}
+	reset := w.ResetAt
+	period := w.windowPeriod()
+	for reset.Before(now) {
+		reset = reset.Add(period)
+	}
+	return reset
+}
+
 // Snapshot is the latest known quota state of one auth profile.
 type Snapshot struct {
 	AuthID    string
