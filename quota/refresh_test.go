@@ -150,3 +150,32 @@ func TestRefreshAuthNow_UnknownAuthDropsSnapshot(t *testing.T) {
 		return !ok
 	}, "expected vanished auth's snapshot to be removed")
 }
+
+func TestNeedsRefresh_FiveHourResetAloneDoesNotTrigger(t *testing.T) {
+	now := time.Now()
+	client := &stubHostClient{}
+	store := NewStore()
+	up := 20.0
+	store.Set(Snapshot{
+		AuthID:   "a",
+		Provider: "codex",
+		// Five-hour reset passed, but the weekly window is still current.
+		FiveHour:  &Window{Kind: WindowFiveHour, UsedPercent: &up, ResetAt: now.Add(-time.Hour)},
+		Long:      &Window{Kind: WindowWeekly, UsedPercent: &up, ResetAt: now.Add(6 * 24 * time.Hour)},
+		FetchedAt: now.Add(-time.Hour),
+	})
+	r := NewRefresher(client, store, func() Config { return Config{Enabled: true} })
+	auth := AuthEntry{ID: "a", AuthIndex: "0", Provider: "codex"}
+
+	if r.needsRefresh(auth, Config{Enabled: true}, now) {
+		t.Fatal("a passed five-hour reset must not trigger a re-fetch on its own")
+	}
+
+	// A passed weekly reset still triggers.
+	snap, _ := store.Get("a")
+	snap.Long.ResetAt = now.Add(-time.Hour)
+	store.Set(snap)
+	if !r.needsRefresh(auth, Config{Enabled: true}, now) {
+		t.Fatal("a passed weekly reset must trigger a re-fetch")
+	}
+}

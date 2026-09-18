@@ -634,10 +634,11 @@ func (r *quotaResolver) Lookup(authID, provider string) balancer.QuotaInfo {
 		if snap.Long != nil && !snap.Long.ResetAt.IsZero() {
 			info.WeeklyResetAt = snap.Long.NextReset(now)
 		}
-		// A window reset that already passed means the snapshot numbers
-		// are stale: fetch fresh quota now instead of waiting for the
-		// next background cycle.
-		if windowResetPassed(snap, now) {
+		// A weekly window reset that already passed means the snapshot
+		// numbers are stale: fetch fresh quota now instead of waiting for
+		// the next background cycle. The five-hour window is tracked
+		// locally from usage feedback, not re-fetched.
+		if longWindowResetPassed(snap, now) {
 			refreshQuotaNow(authID)
 		}
 		if snap.Exhausted() {
@@ -658,15 +659,14 @@ func (r *quotaResolver) Lookup(authID, provider string) balancer.QuotaInfo {
 	return info
 }
 
-// windowResetPassed reports whether any known window reset time has passed,
-// meaning the snapshot numbers may be stale.
-func windowResetPassed(snap quota.Snapshot, now time.Time) bool {
-	for _, w := range []*quota.Window{snap.FiveHour, snap.Long} {
-		if w != nil && !w.ResetAt.IsZero() && !w.ResetAt.After(now) {
-			return true
-		}
-	}
-	return false
+// longWindowResetPassed reports whether the weekly (long) window reset time
+// has passed, meaning the snapshot numbers may be stale. The five-hour
+// window is estimated locally from usage feedback instead: if our estimate
+// is wrong, a failed request (429) tells us and the ledger blocks the
+// profile for five hours.
+func longWindowResetPassed(snap quota.Snapshot, now time.Time) bool {
+	w := snap.Long
+	return w != nil && !w.ResetAt.IsZero() && !w.ResetAt.After(now)
 }
 
 // refreshQuotaNow asks the quota refresher for an immediate, single-flighted

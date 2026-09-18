@@ -249,11 +249,12 @@ func (r *Refresher) needsRefresh(auth AuthEntry, cfg Config, now time.Time) bool
 	if lastUsed, ok := r.store.LastUsed(auth.ID); ok && lastUsed.After(snap.FetchedAt) {
 		return true
 	}
-	// A window whose reset time has passed may hold fresh numbers.
-	for _, w := range []*Window{snap.FiveHour, snap.Long} {
-		if w != nil && !w.ResetAt.IsZero() && !w.ResetAt.After(now) {
-			return true
-		}
+	// A weekly window whose reset time has passed may hold fresh numbers.
+	// (The five-hour window is estimated locally from usage feedback: a
+	// wrong estimate surfaces as a failed request, which the ledger turns
+	// into a five-hour block. It never triggers a re-fetch on its own.)
+	if w := snap.Long; w != nil && !w.ResetAt.IsZero() && !w.ResetAt.After(now) {
+		return true
 	}
 	// Backstop: catch quota consumed outside CPA.
 	maxStale := cfg.MaxStale
