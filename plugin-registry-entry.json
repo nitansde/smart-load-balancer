@@ -1,0 +1,28 @@
+# Draft registry entry for the CLIProxyAPI official plugin store.
+#
+# To publish:
+#   1. Push this repository to GitHub and create a release tagged v0.1.0.
+#      The release workflow builds
+#        smart-load-balancer_<version>_<goos>_<goarch>.zip + checksums.txt
+#      for linux/darwin/windows on amd64/arm64.
+#   2. Open a PR against
+#      https://github.com/router-for-me/CLIProxyAPI-Plugins-Store
+#      adding the entry below to registry.json (replacing
+#      nitansde with the real repo owner).
+#
+# With install type "github-release" the store resolves the latest release
+# automatically; no per-version bookkeeping is needed in the registry.
+
+{
+  "id": "smart-load-balancer",
+  "name": "Smart Load Balancer",
+  "description": "Spreads concurrent client requests across upstream auth profiles (e.g. Codex profiles) with per-key stickiness for prompt-cache reuse, instead of piling them onto the default scheduler's pick.",
+  "author": "nitansde",
+  "repository": "https://github.com/nitansde/smart-load-balancer",
+  "homepage": "https://github.com/nitansde/smart-load-balancer",
+  "license": "MIT",
+  "tags": ["scheduler", "load-balancing", "codex", "routing"],
+  "install": {
+    "type": "github-release"
+  }
+}
