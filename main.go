@@ -81,6 +81,10 @@ type registration struct {
 
 type registrationCapabilities struct {
 	Scheduler bool `json:"scheduler"`
+	// SchedulerAcrossPriorities opts into receiving candidates from all host
+	// priority tiers so the balancer can walk the host's default priority
+	// order itself. Without it the host only sends the highest tier.
+	SchedulerAcrossPriorities bool `json:"scheduler_across_priorities"`
 }
 
 func main() {}
@@ -218,7 +222,8 @@ func pluginRegistration() registration {
 			},
 		},
 		Capabilities: registrationCapabilities{
-			Scheduler: true,
+			Scheduler:               true,
+			SchedulerAcrossPriorities: true,
 		},
 	}
 }
