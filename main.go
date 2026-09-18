@@ -9,11 +9,14 @@ typedef struct {
 	size_t len;
 } cliproxy_buffer;
 
+typedef int (*cliproxy_host_call_fn)(void*, const char*, const uint8_t*, size_t, cliproxy_buffer*);
+typedef void (*cliproxy_host_free_fn)(void*, size_t);
+
 typedef struct {
 	uint32_t abi_version;
 	void* host_ctx;
-	void* call;
-	void* free_buffer;
+	cliproxy_host_call_fn call;
+	cliproxy_host_free_fn free_buffer;
 } cliproxy_host_api;
 
 typedef int (*cliproxy_plugin_call_fn)(char*, uint8_t*, size_t, cliproxy_buffer*);
@@ -30,13 +33,29 @@ typedef struct {
 extern int cliproxyPluginCall(char*, uint8_t*, size_t, cliproxy_buffer*);
 extern void cliproxyPluginFree(void*, size_t);
 extern void cliproxyPluginShutdown(void);
+
+static int call_host_api(cliproxy_host_api* host, const char* method, const uint8_t* request, size_t request_len, cliproxy_buffer* response) {
+	if (host == NULL || host->call == NULL) {
+		return 1;
+	}
+	return host->call(host->host_ctx, method, request, request_len, response);
+}
+
+static void free_host_buffer(cliproxy_host_api* host, void* ptr, size_t len) {
+	if (host != NULL && host->free_buffer != NULL && ptr != NULL) {
+		host->free_buffer(ptr, len);
+	}
+}
 */
 import "C"
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"sync"
 	"sync/atomic"
+	"time"
 	"unsafe"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
@@ -44,6 +63,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/nitansde/smart-load-balancer/balancer"
+	"github.com/nitansde/smart-load-balancer/quota"
 )
 
 const (
@@ -56,6 +76,17 @@ const (
 var (
 	currentConfig atomic.Value // balancer.Config
 	loadBalancer  = balancer.New()
+
+	// hostAPI is the host callback table captured at plugin init. It lets
+	// the quota refresher ask the host for auth credentials and perform
+	// upstream HTTP requests without touching raw sockets.
+	hostAPI atomic.Pointer[C.cliproxy_host_api]
+
+	// quotaStore holds the latest upstream quota snapshot per auth ID.
+	quotaStore = quota.NewStore()
+
+	quotaRefresherMu sync.Mutex
+	quotaRefresher   *quota.Refresher
 )
 
 type envelope struct {
@@ -90,9 +121,12 @@ type registrationCapabilities struct {
 func main() {}
 
 //export cliproxy_plugin_init
-func cliproxy_plugin_init(_ *C.cliproxy_host_api, plugin *C.cliproxy_plugin_api) C.int {
+func cliproxy_plugin_init(host *C.cliproxy_host_api, plugin *C.cliproxy_plugin_api) C.int {
 	if plugin == nil {
 		return 1
+	}
+	if host != nil {
+		hostAPI.Store(host)
 	}
 	currentConfig.Store(balancer.DefaultConfig())
 	plugin.abi_version = C.uint32_t(pluginabi.ABIVersion)
@@ -132,8 +166,137 @@ func cliproxyPluginFree(ptr unsafe.Pointer, len C.size_t) {
 	}
 }
 
+// callHostCallback invokes a host.* callback through the captured host API.
+// It mirrors the mechanism used by the reference codex-quota-scheduler.
+func callHostCallback(method string, payload any) (json.RawMessage, error) {
+	host := hostAPI.Load()
+	if host == nil {
+		return nil, fmt.Errorf("host callback %s unavailable: plugin not initialized with host api", method)
+	}
+	rawPayload, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("marshal host callback payload %s: %w", method, err)
+	}
+	cMethod := C.CString(method)
+	defer C.free(unsafe.Pointer(cMethod))
+	var response C.cliproxy_buffer
+	var requestPtr *C.uint8_t
+	if len(rawPayload) > 0 {
+		cPayload := C.CBytes(rawPayload)
+		if cPayload == nil {
+			return nil, fmt.Errorf("allocate host callback payload %s", method)
+		}
+		defer C.free(cPayload)
+		requestPtr = (*C.uint8_t)(cPayload)
+	}
+	callCode := C.call_host_api(host, cMethod, requestPtr, C.size_t(len(rawPayload)), &response)
+	var rawResponse []byte
+	if response.ptr != nil && response.len > 0 {
+		rawResponse = C.GoBytes(response.ptr, C.int(response.len))
+	}
+	if response.ptr != nil {
+		C.free_host_buffer(host, response.ptr, response.len)
+	}
+	if callCode != 0 {
+		return nil, fmt.Errorf("host callback %s failed with code %d", method, int(callCode))
+	}
+	return json.RawMessage(rawResponse), nil
+}
+
+// cgoHostClient implements quota.HostClient through host callbacks.
+type cgoHostClient struct{}
+
+func (cgoHostClient) ListAuths() ([]quota.AuthEntry, error) {
+	raw, err := callHostCallback(pluginabi.MethodHostAuthList, map[string]any{})
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Files []struct {
+			ID        string `json:"id"`
+			AuthIndex string `json:"auth_index"`
+			Provider  string `json:"provider"`
+		} `json:"files"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return nil, fmt.Errorf("decode host.auth.list: %w", err)
+	}
+	entries := make([]quota.AuthEntry, 0, len(resp.Files))
+	for _, f := range resp.Files {
+		entries = append(entries, quota.AuthEntry{ID: f.ID, AuthIndex: f.AuthIndex, Provider: f.Provider})
+	}
+	return entries, nil
+}
+
+func (cgoHostClient) GetAuthJSON(authIndex string) (json.RawMessage, error) {
+	raw, err := callHostCallback(pluginabi.MethodHostAuthGet, pluginapi.HostAuthGetRequest{AuthIndex: authIndex})
+	if err != nil {
+		return nil, err
+	}
+	var resp pluginapi.HostAuthGetResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return nil, fmt.Errorf("decode host.auth.get: %w", err)
+	}
+	return resp.JSON, nil
+}
+
+func (cgoHostClient) DoHTTP(req quota.HTTPRequest) (quota.HTTPResponse, error) {
+	headers := make(http.Header, len(req.Headers))
+	for k, v := range req.Headers {
+		headers.Set(k, v)
+	}
+	raw, err := callHostCallback(pluginabi.MethodHostHTTPDo, pluginapi.HTTPRequest{
+		Method:  req.Method,
+		URL:     req.URL,
+		Headers: headers,
+		Body:    req.Body,
+	})
+	if err != nil {
+		return quota.HTTPResponse{}, err
+	}
+	var resp pluginapi.HTTPResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return quota.HTTPResponse{}, fmt.Errorf("decode host.http.do: %w", err)
+	}
+	return quota.HTTPResponse{StatusCode: resp.StatusCode, Body: resp.Body}, nil
+}
+
+// quotaRefresherConfig reads the live balancer config into a quota.Config so
+// plugin.reconfigure takes effect without restarting the refresher.
+func quotaRefresherConfig() quota.Config {
+	cfg, _ := currentConfig.Load().(balancer.Config)
+	interval := time.Duration(cfg.QuotaRefreshSeconds) * time.Second
+	if interval <= 0 {
+		interval = 5 * time.Minute
+	}
+	return quota.Config{
+		Enabled:    cfg.QuotaEnabled,
+		Providers:  cfg.QuotaProviders,
+		Interval:   interval,
+		ProbeFresh: cfg.QuotaProbeFresh,
+	}
+}
+
+// ensureQuotaRefresher creates and starts the background quota refresher once.
+func ensureQuotaRefresher() {
+	quotaRefresherMu.Lock()
+	defer quotaRefresherMu.Unlock()
+	if quotaRefresher == nil {
+		quotaRefresher = quota.NewRefresher(cgoHostClient{}, quotaStore, quotaRefresherConfig)
+		loadBalancer.SetQuotaStore(quotaStore)
+	}
+	quotaRefresher.Start()
+}
+
 //export cliproxyPluginShutdown
-func cliproxyPluginShutdown() {}
+func cliproxyPluginShutdown() {
+	quotaRefresherMu.Lock()
+	r := quotaRefresher
+	quotaRefresherMu.Unlock()
+	if r != nil {
+		r.Stop()
+	}
+}
 
 func handleMethod(method string, request []byte) ([]byte, error) {
 	switch method {
@@ -167,6 +330,7 @@ func configure(raw []byte) error {
 		return errValidate
 	}
 	currentConfig.Store(cfg)
+	ensureQuotaRefresher()
 	return nil
 }
 

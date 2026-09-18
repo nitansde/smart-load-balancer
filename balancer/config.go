@@ -51,6 +51,20 @@ type Config struct {
 	// MaxInflightPerProfile is the recent-pick threshold above which a sticky
 	// assignment spills over to the least-loaded profile.
 	MaxInflightPerProfile int `yaml:"max_inflight_per_profile"`
+	// QuotaEnabled turns on background upstream quota fetching for OAuth
+	// providers (currently Codex) via the host's auth callbacks. The
+	// snapshots feed quota-aware ordering. Defaults to true.
+	QuotaEnabled bool `yaml:"quota_enabled"`
+	// QuotaProviders restricts quota fetching to these provider keys
+	// (for example ["codex"]). Empty means every provider with a known
+	// quota endpoint.
+	QuotaProviders []string `yaml:"quota_providers"`
+	// QuotaRefreshSeconds is how often upstream quota is re-fetched.
+	QuotaRefreshSeconds int `yaml:"quota_refresh_seconds"`
+	// QuotaProbeFresh sends one minimal "ping" request when a never-used
+	// quota window is detected, starting that window's countdown.
+	// Defaults to false.
+	QuotaProbeFresh bool `yaml:"quota_probe_fresh"`
 }
 
 // WithDefaults returns the config with zero values replaced by defaults and
@@ -95,6 +109,29 @@ func (c Config) WithDefaults() Config {
 	if out.MaxInflightPerProfile > 10000 {
 		out.MaxInflightPerProfile = 10000
 	}
+	if out.QuotaRefreshSeconds <= 0 {
+		out.QuotaRefreshSeconds = 300
+	}
+	if out.QuotaRefreshSeconds < 60 {
+		out.QuotaRefreshSeconds = 60
+	}
+	if out.QuotaRefreshSeconds > 3600 {
+		out.QuotaRefreshSeconds = 3600
+	}
+	quotaProviders := make([]string, 0, len(out.QuotaProviders))
+	seenQP := make(map[string]struct{}, len(out.QuotaProviders))
+	for _, p := range out.QuotaProviders {
+		p = strings.ToLower(strings.TrimSpace(p))
+		if p == "" {
+			continue
+		}
+		if _, ok := seenQP[p]; ok {
+			continue
+		}
+		seenQP[p] = struct{}{}
+		quotaProviders = append(quotaProviders, p)
+	}
+	out.QuotaProviders = quotaProviders
 	return out
 }
 
@@ -106,6 +143,8 @@ func DefaultConfig() Config {
 		StickyTTLSeconds:      int(DefaultStickyTTL / time.Second),
 		WindowSeconds:         int(DefaultWindow / time.Second),
 		MaxInflightPerProfile: DefaultMaxInflightPerProfile,
+		QuotaEnabled:          true,
+		QuotaRefreshSeconds:   300,
 	}.WithDefaults()
 }
 

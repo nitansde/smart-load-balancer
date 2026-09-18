@@ -9,7 +9,10 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"github.com/nitansde/smart-load-balancer/quota"
 )
 
 // Candidate is one upstream auth profile offered by the host for a pick.
@@ -38,6 +41,29 @@ type Balancer struct {
 	picks    []pickRecord
 	sticky   map[string]stickyEntry
 	rrCursor uint64
+	// quotaStore holds upstream quota snapshots when the host-backed
+	// refresher is running; nil until SetQuotaStore is called.
+	quotaStore atomic.Pointer[quota.Store]
+}
+
+// SetQuotaStore attaches the upstream quota snapshot store. The pick
+// algorithm consults it when present; a nil store disables quota-aware
+// ordering.
+func (b *Balancer) SetQuotaStore(s *quota.Store) {
+	if s == nil {
+		return
+	}
+	b.quotaStore.Store(s)
+}
+
+// QuotaSnapshot returns the latest upstream quota snapshot for authID, if
+// the quota store is attached and has one.
+func (b *Balancer) QuotaSnapshot(authID string) (quota.Snapshot, bool) {
+	store := b.quotaStore.Load()
+	if store == nil {
+		return quota.Snapshot{}, false
+	}
+	return store.Get(authID)
 }
 
 // New returns a Balancer using the real clock.
