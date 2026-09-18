@@ -80,12 +80,18 @@ type Refresher struct {
 	store  *Store
 	config func() Config
 
-	mu      sync.Mutex
-	running bool
-	stop    chan struct{}
-	wg      sync.WaitGroup
-	probed  map[string]bool
+	mu       sync.Mutex
+	running  bool
+	stop     chan struct{}
+	wg       sync.WaitGroup
+	probed   map[string]bool
+	onDemand map[string]time.Time
 }
+
+// onDemandCooldown caps how often a stale snapshot is re-fetched on demand:
+// concurrent picks share one attempt, and a failed attempt waits before the
+// next try.
+const onDemandCooldown = 5 * time.Minute
 
 // NewRefresher returns a Refresher that is not yet running.
 func NewRefresher(client HostClient, store *Store, config func() Config) *Refresher {
@@ -186,6 +192,48 @@ func (r *Refresher) RefreshOnce() {
 			r.store.Remove(id)
 		}
 	}
+}
+
+// RefreshAuthNow re-fetches one auth's quota snapshot in the background.
+// It is meant for snapshots whose window reset time has passed: the stored
+// numbers are stale, and the next pick should see fresh ones instead of
+// waiting for the next background cycle. Calls are single-flighted per auth
+// with a cooldown, so a burst of picks triggers at most one fetch. Works
+// even when background calibration is disabled (on-demand only).
+func (r *Refresher) RefreshAuthNow(authID string) {
+	if r == nil || authID == "" {
+		return
+	}
+	cfg := r.config()
+	if !cfg.Enabled {
+		return
+	}
+	now := time.Now()
+	r.mu.Lock()
+	if r.onDemand == nil {
+		r.onDemand = make(map[string]time.Time)
+	}
+	if last, ok := r.onDemand[authID]; ok && now.Sub(last) < onDemandCooldown {
+		r.mu.Unlock()
+		return
+	}
+	r.onDemand[authID] = now
+	r.mu.Unlock()
+
+	go func() {
+		auths, err := r.client.ListAuths()
+		if err != nil {
+			return
+		}
+		for _, a := range auths {
+			if a.ID == authID {
+				r.refreshOne(a, cfg)
+				return
+			}
+		}
+		// Auth vanished: drop its snapshot.
+		r.store.Remove(authID)
+	}()
 }
 
 // needsRefresh reports whether auth's quota could have changed since its

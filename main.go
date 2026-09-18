@@ -629,9 +629,16 @@ func (r *quotaResolver) Lookup(authID, provider string) balancer.QuotaInfo {
 		}
 		// Weekly reset drives reset-soonest ordering; reset moments
 		// within an hour count as the same tier. An already-passed
-		// reset is projected forward to the next window.
+		// reset is projected forward to the next window until a fresh
+		// fetch lands.
 		if snap.Long != nil && !snap.Long.ResetAt.IsZero() {
 			info.WeeklyResetAt = snap.Long.NextReset(now)
+		}
+		// A window reset that already passed means the snapshot numbers
+		// are stale: fetch fresh quota now instead of waiting for the
+		// next background cycle.
+		if windowResetPassed(snap, now) {
+			refreshQuotaNow(authID)
 		}
 		if snap.Exhausted() {
 			// A precise snapshot reporting exhaustion blocks the profile
@@ -649,6 +656,29 @@ func (r *quotaResolver) Lookup(authID, provider string) balancer.QuotaInfo {
 		info.Fresh = true
 	}
 	return info
+}
+
+// windowResetPassed reports whether any known window reset time has passed,
+// meaning the snapshot numbers may be stale.
+func windowResetPassed(snap quota.Snapshot, now time.Time) bool {
+	for _, w := range []*quota.Window{snap.FiveHour, snap.Long} {
+		if w != nil && !w.ResetAt.IsZero() && !w.ResetAt.After(now) {
+			return true
+		}
+	}
+	return false
+}
+
+// refreshQuotaNow asks the quota refresher for an immediate, single-flighted
+// re-fetch of authID's quota snapshot. Safe to call from the pick path.
+func refreshQuotaNow(authID string) {
+	quotaRefresherMu.Lock()
+	r := quotaRefresher
+	quotaRefresherMu.Unlock()
+	if r == nil {
+		return
+	}
+	r.RefreshAuthNow(authID)
 }
 
 // maybeProbeFresh sends one minimal ping when authID is a never-used
