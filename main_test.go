@@ -75,3 +75,61 @@ func TestConfigFieldsAreMinimal(t *testing.T) {
 		t.Fatalf("unexpected config fields: %q, %q, %q", fields[0].Name, fields[1].Name, fields[2].Name)
 	}
 }
+
+// FiveHourBoost end-to-end: an idle profile whose 5h window sits at 100%
+// with a rolling reset must be marked during lookup, and the next pick
+// must divert one real request to it to kick off its 5h countdown.
+func TestFiveHourBoost_DivertsToIdleProfile(t *testing.T) {
+	now := time.Now()
+	cfg := balancer.DefaultConfig()
+	cfg.FiveHourBoost = true
+	currentConfig.Store(cfg)
+	defer currentConfig.Store(balancer.DefaultConfig())
+
+	fresh := balancer.NewDivertState()
+	oldDivert := divertState
+	divertState = fresh
+	loadBalancer.SetDivertState(fresh)
+	defer func() {
+		divertState = oldDivert
+		loadBalancer.SetDivertState(oldDivert)
+	}()
+
+	zero := 0.0
+	half := 50.0
+	ten := 10.0
+	// The idle snapshot was fetched 3h ago with a rolling reset: idleness
+	// must be judged at fetch time, or the kick would never fire.
+	fetched := now.Add(-3 * time.Hour)
+	quotaStore.Set(quota.Snapshot{
+		AuthID:    "idle",
+		Provider:  "codex",
+		FetchedAt: fetched,
+		FiveHour:  &quota.Window{Kind: quota.WindowFiveHour, UsedPercent: &zero, ResetAt: fetched.Add(5 * time.Hour)},
+		Long:      &quota.Window{Kind: quota.WindowWeekly, UsedPercent: &ten, ResetAt: now.Add(6 * 24 * time.Hour)},
+	})
+	quotaStore.Set(quota.Snapshot{
+		AuthID:   "busy",
+		Provider: "codex",
+		FiveHour: &quota.Window{Kind: quota.WindowFiveHour, UsedPercent: &half, ResetAt: now.Add(3 * time.Hour)},
+		Long:     &quota.Window{Kind: quota.WindowWeekly, UsedPercent: &ten, ResetAt: now.Add(6 * 24 * time.Hour)},
+	})
+	defer quotaStore.Remove("idle")
+	defer quotaStore.Remove("busy")
+
+	r := &quotaResolver{now: time.Now}
+	r.Lookup("idle", "codex")
+	if fresh.Pending.Len() != 1 {
+		t.Fatalf("idle profile should be marked for 5h kick, pending=%d", fresh.Pending.Len())
+	}
+
+	// Feed small-request stats so the borrowing key counts as small.
+	for i := 0; i < 10; i++ {
+		fresh.Stats.Observe("testkey", 10)
+	}
+	cands := []balancer.Candidate{{ID: "busy", Provider: "codex"}, {ID: "idle", Provider: "codex"}}
+	got, handled := loadBalancer.PickWithQuota("testkey", cands, cfg, r)
+	if !handled || got != "idle" {
+		t.Fatalf("pick should divert to idle profile, got %q handled=%v", got, handled)
+	}
+}

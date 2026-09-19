@@ -194,6 +194,7 @@ func fiveHourWindow(used float64, resetAt time.Time) *Window {
 
 func TestSnapshotFiveHourFresh(t *testing.T) {
 	now := time.Now()
+	fetched := now.Add(-3 * time.Hour) // a stale snapshot: idleness must be judged at fetch time
 	cases := []struct {
 		name string
 		snap Snapshot
@@ -208,6 +209,11 @@ func TestSnapshotFiveHourFresh(t *testing.T) {
 		{"zero use within tolerance", Snapshot{FiveHour: fiveHourWindow(0, now.Add(5*time.Hour-4*time.Minute))}, true},
 		{"zero use countdown running", Snapshot{FiveHour: fiveHourWindow(0, now.Add(3*time.Hour))}, false},
 		{"zero use no reset info", Snapshot{FiveHour: fiveHourWindow(0, time.Time{})}, true},
+		// Stale snapshots: the rolling reset froze at fetch time, so it
+		// must still count as idle hours later.
+		{"stale idle rolling reset", Snapshot{FetchedAt: fetched, FiveHour: fiveHourWindow(0, fetched.Add(5*time.Hour))}, true},
+		{"stale locked reset", Snapshot{FetchedAt: fetched, FiveHour: fiveHourWindow(0, fetched.Add(4*time.Hour))}, false},
+		{"stale renewed reset", Snapshot{FetchedAt: fetched, FiveHour: fiveHourWindow(0, fetched.Add(time.Hour))}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

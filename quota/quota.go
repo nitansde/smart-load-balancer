@@ -103,9 +103,14 @@ const kickTolerance = 5 * time.Minute
 // countdown running, i.e. a borrowed real request should kick off its
 // countdown the way the weekly mode does for cold profiles. True when the
 // window already renewed (reset passed, effectively 100% again), or when
-// it shows 0% use with a reset still about a full window out (rolling,
-// never started). A 0% with a reset locked in clearly sooner means the
+// it showed 0% use with a reset about a full window out (rolling, never
+// started). A 0% with a reset locked in clearly sooner means the
 // countdown is running and the 0% is just rounding of tiny use.
+//
+// Idleness is judged at fetch time, not now: the snapshot goes stale
+// while the profile sits idle, and a rolling reset frozen at fetch time
+// would otherwise decay below the tolerance within minutes of the fetch
+// — the kick would then (almost) never fire.
 func (s Snapshot) FiveHourFresh(now time.Time) bool {
 	w := s.FiveHour
 	if w == nil {
@@ -120,7 +125,11 @@ func (s Snapshot) FiveHourFresh(now time.Time) bool {
 	if w.ResetAt.IsZero() {
 		return true
 	}
-	return !w.ResetAt.Before(now.Add(w.windowPeriod() - kickTolerance))
+	base := s.FetchedAt
+	if base.IsZero() {
+		base = now
+	}
+	return !w.ResetAt.Before(base.Add(w.windowPeriod() - kickTolerance))
 }
 
 // LongUsedPercent returns the long window's used percent, or -1 when unknown.
