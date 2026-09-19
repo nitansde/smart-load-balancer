@@ -278,15 +278,16 @@ func rankCandidates(candidates []Candidate, cfg Config, resolver QuotaResolver, 
 	return ranked
 }
 
-// resetTieWindow is the tolerance within which two weekly reset moments
-// count as the same reset: the scheduler treats them as one tier and
-// falls through to the fill-first keys.
+// resetTieWindow is the tolerance within which two long-window reset
+// moments count as the same reset: the scheduler treats them as one tier
+// and falls through to the fill-first keys.
 const resetTieWindow = time.Hour
 
 // longResetLess reports whether profile a's long-window quota resets
 // meaningfully sooner than b's. The long window is weekly or monthly,
-// whichever the account is on; both sort by reset time identically. Profiles with a known reset sort before
-// profiles without one; a reset already in the past is treated as now
+// whichever the account is on; both sort by reset time identically.
+// Profiles with a known reset sort before profiles without one; a reset
+// already in the past is treated as now
 // (its quota just renewed). Reset moments within resetTieWindow of each
 // other tie, so the caller falls through to the next ranking key.
 func longResetLess(a, b time.Time, now time.Time) bool {
