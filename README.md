@@ -41,7 +41,7 @@ Once published to the official store, install from the CLIProxyAPI management UI
          providers: ["codex"]      # optional: only balance these providers; empty = all
          strategy: least-connections # or: round-robin
          sticky: true
-         sticky_ttl_seconds: 1800
+         sticky_ttl_seconds: 14400  # 4h
          window_seconds: 120
          max_inflight_per_profile: 8
          quota_enabled: true        # quota-aware ordering via usage feedback (no polling)
@@ -57,9 +57,9 @@ Once published to the official store, install from the CLIProxyAPI management UI
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `providers` | array | `[]` | Only balance across these provider keys (e.g. `codex`). Empty means every provider offered by the host. |
-| `strategy` | enum | `least-connections` | `least-connections` spreads load; `round-robin` cycles through profiles in stable id order. |
+| `strategy` | enum | `least-connections` | Accepted for compatibility (`least-connections` or `round-robin`) but ignored: the plugin always takes the top-ranked candidate from its quota-aware ordering. |
 | `sticky` | bool | `true` | Pin each client API key to one profile while it stays healthy (prompt-cache affinity). |
-| `sticky_ttl_seconds` | int | `1800` | How long an idle sticky assignment is kept. |
+| `sticky_ttl_seconds` | int | `14400` (4h) | How long an idle sticky assignment is kept. |
 | `window_seconds` | int | `120` | Sliding window used to estimate recent load per profile. |
 | `max_inflight_per_profile` | int | `8` | Recent-pick threshold above which a sticky assignment spills over to the least-loaded profile. |
 | `quota_enabled` | bool | `true` | Quota-aware ordering. Primary signal is the usage-feedback ledger (see below); precise upstream snapshots are only used for calibration. |
@@ -82,7 +82,7 @@ The plugin registers three capabilities: `scheduler`, `usage_plugin`, and `quota
 
 A profile never scheduled through this plugin is assumed at 100% remaining; the scheduler owns all routing, so its own ledger is authoritative and drift is corrected by calibration.
 
-**Reset-soonest ordering.** On each pick, blocked profiles are excluded first. A client's sticky profile is kept while it stays healthy (prompt-cache affinity); on exhaustion the client fails over. Fresh selection ranks profiles: your `quota_priorities` order first, then known-before-unknown, then long-window-reset-soonest first (the long window is weekly or monthly, whichever the account is on; reset moments within 1 hour count as the same moment; profiles without a known reset rank after those with one), then fill-first inside each reset tier (highest precise `used_percent`, else highest ledger-consumed tokens, never-used last), then host priority tier (higher first, mirroring CPA's default scheduler), then fewest other clients' sticky claims, then least recent load with a deterministic per-key tie-break so different client keys spread instead of colliding.
+**Reset-soonest ordering.** On each pick, blocked profiles are excluded first. A client's sticky profile is kept while it stays healthy (prompt-cache affinity); on exhaustion the client fails over. Fresh selection ranks profiles: your `quota_priorities` order first, then known-before-unknown, then long-window-reset-soonest first (the long window is weekly or monthly, whichever the account is on; reset moments within 1 hour count as the same moment; profiles without a known reset rank after those with one), then profiles claimed by other client keys sort after every unclaimed profile (no-conflict is guaranteed while any unclaimed profile exists; only when all candidates are claimed does fewest-claimed win), then fill-first inside each reset tier (highest precise `used_percent`, else highest ledger-consumed tokens, never-used last), then host priority tier (higher first, mirroring CPA's default scheduler), then least recent load with a deterministic per-key tie-break so different client keys spread instead of colliding. The `strategy` setting is ignored.
 
 **Precise quota is on-demand calibration.** The plugin implements the `quota_provider` capability, so when you manually refresh a credential's quota in the management UI, the host calls this plugin's `quota.fetch` — which updates the scheduler's snapshot store as a side effect. One code path, never duplicated work. Background calibration defaults to every 72h and can be turned off entirely (`quota_refresh_seconds: 0`) if you only want manual refreshes. Each calibration cycle staggers its per-profile fetches across a 6-hour window (profile count determines the spacing), so profiles never hit the upstream endpoint at once. Every completed request also harvests quota passively: the host merges the upstream quota event into the response headers handed to `usage.handle`, so each request carries its profile's latest window numbers with zero extra fetches. Active profiles stay calibrated from traffic alone.
 

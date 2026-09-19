@@ -23,7 +23,7 @@ const (
 const (
 	DefaultStrategy              = StrategyLeastConnections
 	DefaultSticky                = true
-	DefaultStickyTTL             = 30 * time.Minute
+	DefaultStickyTTL             = 4 * time.Hour
 	DefaultWindow                = 120 * time.Second
 	DefaultMaxInflightPerProfile = 8
 	// DefaultQuotaCalibration is the default background precise-quota
@@ -42,8 +42,9 @@ type Config struct {
 	// Providers optionally restricts balancing to these provider keys
 	// (for example ["codex"]). Empty means every provider offered by the host.
 	Providers []string `yaml:"providers"`
-	// Strategy selects the balancing policy: "least-connections" (default)
-	// or "round-robin".
+	// Strategy is accepted for compatibility ("least-connections",
+	// "round-robin") but ignored: the plugin always takes the
+	// top-ranked candidate from its quota-aware ordering.
 	Strategy string `yaml:"strategy"`
 	// Sticky pins a client API key to one profile while that profile stays
 	// healthy, improving prompt-cache reuse. Defaults to true.

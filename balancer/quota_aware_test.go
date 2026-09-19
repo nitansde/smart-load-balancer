@@ -285,3 +285,41 @@ func TestPickWithQuota_MonthlyResetSameAsWeekly(t *testing.T) {
 		t.Fatalf("expected sooner-reset monthly profile, got %q", authID)
 	}
 }
+
+func TestPickWithQuota_NoConflictOutranksQuota(t *testing.T) {
+	b := New()
+	now := time.Now()
+	cfg := quotaTestConfig()
+	cfg.Sticky = true
+	cands := candidates("claimed", "free")
+	// Another key claimed "claimed", which has the sooner reset and higher
+	// used%: the no-conflict guarantee still wins.
+	b.mu.Lock()
+	b.sticky["other"] = stickyEntry{authID: "claimed", lastUsed: b.now()}
+	b.mu.Unlock()
+	resolver := stubResolver{infos: map[string]QuotaInfo{
+		"claimed": {Known: true, UsedPercent: pct(90), LongResetAt: now.Add(time.Hour)},
+		"free":    {Known: true, UsedPercent: pct(10), LongResetAt: now.Add(5 * 24 * time.Hour)},
+	}}
+	authID, _ := b.PickWithQuota("newkey", cands, cfg, resolver)
+	if authID != "free" {
+		t.Fatalf("expected unclaimed profile free, got %q", authID)
+	}
+}
+
+func TestPickWithQuota_AllClaimedAllowsConflict(t *testing.T) {
+	b := New()
+	cfg := quotaTestConfig()
+	cfg.Sticky = true
+	cands := candidates("a", "b")
+	b.mu.Lock()
+	b.sticky["k1"] = stickyEntry{authID: "a", lastUsed: b.now()}
+	b.sticky["k2"] = stickyEntry{authID: "a", lastUsed: b.now()}
+	b.sticky["k3"] = stickyEntry{authID: "b", lastUsed: b.now()}
+	b.mu.Unlock()
+	// Every candidate is claimed: conflict is allowed, fewest-claimed wins.
+	authID, _ := b.PickWithQuota("newkey", cands, cfg, stubResolver{})
+	if authID != "b" {
+		t.Fatalf("expected fewest-claimed profile b, got %q", authID)
+	}
+}

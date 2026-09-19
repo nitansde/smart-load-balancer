@@ -67,11 +67,10 @@ type stickyEntry struct {
 // Balancer spreads picks across candidates. It is safe for concurrent use;
 // the host may invoke scheduler.pick from many goroutines at once.
 type Balancer struct {
-	mu       sync.Mutex
-	now      func() time.Time
-	picks    []pickRecord
-	sticky   map[string]stickyEntry
-	rrCursor uint64
+	mu     sync.Mutex
+	now    func() time.Time
+	picks  []pickRecord
+	sticky map[string]stickyEntry
 }
 
 // New returns a Balancer using the real clock.
@@ -136,13 +135,19 @@ func (b *Balancer) Pick(keyHash string, candidates []Candidate, cfg Config) (str
 //     and below the spillover threshold, so prompt caches stay warm.
 //  3. Fresh selection, ranked:
 //     a. user quota_priorities order (unlisted last),
-//     b. quota-known profiles before unknown ones,
-//     c. known: precise snapshot (used% desc) before estimated
-//     (consumed tokens desc; never-used last),
-//     d. unknown: host priority tier, higher first (CPA's direction),
-//     e. fewest sticky owners first (avoid profiles other keys claimed),
-//     f. strategy tie-break: least-connections prefers the lowest recent
-//     load; round-robin cycles through the top tier in ID order.
+//     b. profiles claimed by other client keys sort after every unclaimed
+//     profile (no-conflict guarantee; only when all candidates are
+//     claimed does the fewest-owners key in (g) decide),
+//     c. quota-known profiles before unknown ones,
+//     d. known: long-window reset soonest first (weekly or monthly,
+//     whichever the account is on; resets within an hour tie),
+//     e. same reset tier: fill-first, precise used% desc, else ledger
+//     consumed tokens desc, never-used last,
+//     f. unknown: host priority tier, higher first (CPA's direction),
+//     g. fewest other-key sticky owners first,
+//     h. least recent load, then deterministic per-key tie-break.
+//     The strategy setting is accepted for compatibility but ignored:
+//     selection always takes the top-ranked candidate.
 func (b *Balancer) PickWithQuota(keyHash string, candidates []Candidate, cfg Config, resolver QuotaResolver) (string, bool) {
 	cfg = cfg.WithDefaults()
 	now := b.now()
@@ -173,8 +178,15 @@ func (b *Balancer) PickWithQuota(keyHash string, candidates []Candidate, cfg Con
 	for _, rec := range b.picks {
 		loads[rec.authID]++
 	}
+	// owners counts sticky claims by *other* client keys. Fresh selection
+	// guarantees no conflict while any unclaimed profile is available: a
+	// profile claimed by another key is only chosen when every candidate
+	// is claimed, and then the fewest-claimed one wins.
 	owners := make(map[string]int, len(eligible))
-	for _, entry := range b.sticky {
+	for kh, entry := range b.sticky {
+		if kh == keyHash {
+			continue
+		}
 		owners[entry.authID]++
 	}
 
@@ -189,13 +201,9 @@ func (b *Balancer) PickWithQuota(keyHash string, candidates []Candidate, cfg Con
 	}
 
 	ranked := rankCandidates(eligible, cfg, resolver, keyHash, loads, owners)
-	var chosen string
-	if cfg.Strategy == StrategyRoundRobin {
-		chosen = roundRobinTopTier(ranked, cfg, resolver, b.rrCursor)
-		b.rrCursor++
-	} else {
-		chosen = ranked[0].ID
-	}
+	// The strategy setting is accepted for compatibility but ignored:
+	// selection always takes the top-ranked candidate.
+	chosen := ranked[0].ID
 	b.recordLocked(chosen, keyHash, now, cfg)
 	return chosen, true
 }
@@ -227,6 +235,13 @@ func rankCandidates(candidates []Candidate, cfg Config, resolver QuotaResolver, 
 		a, bq := ranked[i], ranked[j]
 		if ra, rb := userRank(cfg.QuotaPriorities, a.ID), userRank(cfg.QuotaPriorities, bq.ID); ra != rb {
 			return ra < rb
+		}
+		// No-conflict guarantee: a profile claimed by another client key
+		// sorts after every unclaimed profile. The owners key further
+		// below only decides among claimed profiles when no unclaimed
+		// candidate exists at all.
+		if ca, cb := owners[a.ID] > 0, owners[bq.ID] > 0; ca != cb {
+			return cb
 		}
 		qa, qb := infos[a.ID], infos[bq.ID]
 		if qa.Known != qb.Known {
@@ -260,12 +275,10 @@ func rankCandidates(candidates []Candidate, cfg Config, resolver QuotaResolver, 
 			// higher first, mirroring CPA's default scheduler.
 			return a.Priority > bq.Priority
 		}
-		// Avoid profiles already claimed by other client keys.
+		// Only reached when every candidate is claimed by other keys:
+		// prefer the fewest-claimed profile.
 		if owners[a.ID] != owners[bq.ID] {
 			return owners[a.ID] < owners[bq.ID]
-		}
-		if cfg.Strategy == StrategyRoundRobin {
-			return a.ID < bq.ID
 		}
 		if loads[a.ID] != loads[bq.ID] {
 			return loads[a.ID] < loads[bq.ID]
@@ -323,64 +336,12 @@ func longResetTie(a, b time.Time, now time.Time) bool {
 	return !longResetLess(a, b, now) && !longResetLess(b, a, now)
 }
 
-// roundRobinTopTier cycles through the candidates tied with the best-ranked
-// one on every key above the strategy tie-break, in ID order.
-func roundRobinTopTier(ranked []Candidate, cfg Config, resolver QuotaResolver, cursor uint64) string {
-	if len(ranked) == 0 {
-		return ""
-	}
-	top := ranked[:1]
-	best := ranked[0]
-	bestRank, bestInfo := userRank(cfg.QuotaPriorities, best.ID), lookupInfo(resolver, best)
-	for _, c := range ranked[1:] {
-		if userRank(cfg.QuotaPriorities, c.ID) != bestRank {
-			break
-		}
-		qi := lookupInfo(resolver, c)
-		if !sameQuotaTier(bestInfo, qi) || (!bestInfo.Known && c.Priority != best.Priority) {
-			break
-		}
-		top = append(top, c)
-	}
-	return top[cursor%uint64(len(top))].ID
-}
-
-func lookupInfo(resolver QuotaResolver, c Candidate) QuotaInfo {
-	if resolver == nil {
-		return QuotaInfo{}
-	}
-	return resolver.Lookup(c.ID, c.Provider)
-}
-
-// sameQuotaTier reports whether two quota infos tie on every ranking key
-// above the strategy tie-break.
-func sameQuotaTier(a, b QuotaInfo) bool {
-	if a.Known != b.Known {
-		return false
-	}
-	if !a.Known {
-		return true
-	}
-	if !longResetTie(a.LongResetAt, b.LongResetAt, time.Now()) {
-		return false
-	}
-	pa, pb := a.UsedPercent != nil, b.UsedPercent != nil
-	if pa != pb {
-		return false
-	}
-	if pa {
-		return *a.UsedPercent == *b.UsedPercent
-	}
-	return a.ConsumedTokens == b.ConsumedTokens
-}
-
 // Reset clears all balancer state. Used by tests.
 func (b *Balancer) Reset() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.picks = nil
 	b.sticky = make(map[string]stickyEntry)
-	b.rrCursor = 0
 }
 
 // LoadSnapshot reports the current per-profile pick counts inside the window.

@@ -192,20 +192,41 @@ func TestWindowPrunesOldPicks(t *testing.T) {
 	}
 }
 
-// Round-robin cycles through profiles in stable ID order.
-func TestRoundRobinCycles(t *testing.T) {
-	b, _ := newTestBalancer()
-	cfg := testConfig()
-	cfg.Strategy = StrategyRoundRobin
-	cfg.Sticky = false
-	candidates := codexCandidates(3) // IDs sort as codex-profile-0,1,2
+// The strategy setting is ignored: a round-robin config must pick exactly
+// like least-connections.
+func TestStrategyIgnored(t *testing.T) {
+	newCfg := func(strategy string) Config {
+		cfg := testConfig()
+		cfg.Strategy = strategy
+		cfg.Sticky = false
+		return cfg
+	}
+	candidates := codexCandidates(3)
 
-	want := []string{"codex-profile-0", "codex-profile-1", "codex-profile-2", "codex-profile-0"}
-	for i, w := range want {
-		got, ok := b.Pick("", candidates, cfg)
-		if !ok || got != w {
-			t.Fatalf("pick %d = %q,%v; want %q", i, got, ok, w)
+	var seqLC, seqRR []string
+	b1, _ := newTestBalancer()
+	for i := 0; i < 6; i++ {
+		got, _ := b1.Pick("", candidates, newCfg(StrategyLeastConnections))
+		seqLC = append(seqLC, got)
+	}
+	b2, _ := newTestBalancer()
+	for i := 0; i < 6; i++ {
+		got, _ := b2.Pick("", candidates, newCfg(StrategyRoundRobin))
+		seqRR = append(seqRR, got)
+	}
+	for i := range seqLC {
+		if seqLC[i] != seqRR[i] {
+			t.Fatalf("strategy must be ignored: least-connections[%d]=%q, round-robin[%d]=%q",
+				i, seqLC[i], i, seqRR[i])
 		}
+	}
+}
+
+// Sticky TTL defaults to 4 hours.
+func TestStickyTTLDefaultFourHours(t *testing.T) {
+	cfg := DefaultConfig()
+	if got := cfg.StickyTTL(); got != 4*time.Hour {
+		t.Fatalf("default sticky TTL = %v, want 4h", got)
 	}
 }
 
