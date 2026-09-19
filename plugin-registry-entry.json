@@ -16,7 +16,7 @@
 {
   "id": "smart-load-balancer",
   "name": "Smart Load Balancer",
-  "description": "Routes each client API key to its own upstream profile and spends quota that resets soonest first — with per-key stickiness for warm prompt caches and automatic failover when a profile runs dry.",
+  "description": "Load balance each client API key to its own codex profile and spends quota that resets soonest first — with per-key stickiness for better caches and reduce codex risk control. It also auto-sends a tiny hi to kick off the weekly quota countdown.",
   "author": "nitansde",
   "repository": "https://github.com/nitansde/smart-load-balancer",
   "homepage": "https://github.com/nitansde/smart-load-balancer",
