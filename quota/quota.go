@@ -81,9 +81,11 @@ type Snapshot struct {
 	FetchedAt time.Time
 }
 
-// Fresh reports whether the long (weekly/monthly) window has never been used.
-// A fresh window's countdown starts on first use, so callers may want to
-// probe it once before relying on its reset time.
+// Fresh reports whether the long (weekly/monthly) window shows zero use.
+// For Codex each window's countdown starts on first token use, so a
+// zero-use window has no countdown running: callers may want to send one
+// minimal request to start it and learn the reset time. Note this can't
+// tell "never used" from "just reset" — both show 0%.
 func (s Snapshot) Fresh() bool {
 	if s.Long == nil || s.Long.UsedPercent == nil {
 		return false

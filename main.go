@@ -448,11 +448,6 @@ func pickAuth(raw []byte) ([]byte, error) {
 	if handled && authID != "" {
 		// Tell the quota calibrator this profile's numbers may have moved.
 		quotaStore.MarkUsed(authID)
-		// First pick of a never-used profile: optionally send one minimal
-		// ping to start its weekly window countdown.
-		if cfg.QuotaProbeFresh {
-			maybeProbeFresh(authID)
-		}
 	}
 	return okEnvelope(pluginapi.SchedulerPickResponse{
 		AuthID:  authID,
@@ -658,32 +653,6 @@ func refreshQuotaNow(authID string) {
 		return
 	}
 	r.RefreshAuthNow(authID)
-}
-
-// maybeProbeFresh sends one minimal ping when authID was never used,
-// starting its weekly window countdown. "Never used" is decided by the
-// local usage ledger alone: all usage flows through CPA, so the ledger is
-// authoritative, and upstream used_percent rounding to 0% proves nothing.
-func maybeProbeFresh(authID string) {
-	if entry, ok := quotaLedger.Get(authID); ok && !entry.Fresh() {
-		return
-	}
-	auths, err := cgoHostClient{}.ListAuths()
-	if err != nil {
-		return
-	}
-	for _, auth := range auths {
-		if auth.ID != authID || !quota.HasEndpoint(auth.Provider) {
-			continue
-		}
-		creds, err := quota.CredentialsForAuth(cgoHostClient{}, auth)
-		if err != nil {
-			return
-		}
-		quota.ProbeFreshWindow(cgoHostClient{}.DoHTTP, creds)
-		quotaLedger.MarkProbed(authID)
-		return
-	}
 }
 
 func okEnvelope(v any) ([]byte, error) {

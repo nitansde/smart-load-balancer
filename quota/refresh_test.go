@@ -323,36 +323,45 @@ func TestRefreshOnce_SkipsPendingOnDemand(t *testing.T) {
 	}
 }
 
-func TestRefresherNoProbeWhenLedgerHasHistory(t *testing.T) {
+func TestRefresherKickAfterResetWithHistory(t *testing.T) {
 	client := &fakeHostClient{
 		auths:    []AuthEntry{{ID: "auth-1", AuthIndex: "0", Provider: "codex"}},
 		authJSON: map[string]json.RawMessage{"0": json.RawMessage(`{"access_token":"tok-a"}`)},
-		// Upstream reports 0% (fresh snapshot) even though the profile was
-		// used: tiny usage rounds to zero.
-		usage: map[string][]byte{"tok-a": []byte(freshUsage)},
+		// Window reset back to 100% with no countdown running.
+		usage: map[string][]byte{"tok-a": []byte(resetUsage)},
 	}
 	store := NewStore()
 	ledger := NewLedger()
-	// Local call history exists: one observed request.
-	ledger.Observe(UsageObservation{AuthID: "auth-1", Provider: "codex", TotalTokens: 120})
+	// The profile was heavily used in the previous window: local history
+	// exists, but the new window's countdown hasn't started, so the kick
+	// is still due. This is the whole point of the kick.
+	ledger.Observe(UsageObservation{AuthID: "auth-1", Provider: "codex",
+		TotalTokens: 500000, ObservedAt: time.Now().Add(-8 * 24 * time.Hour)})
 	cfg := testConfig()
 	cfg.ProbeFresh = true
 	r := NewRefresher(client, store, ledger, func() Config { return cfg })
 	r.spread = time.Millisecond
 	r.RefreshOnce()
 
+	probes := 0
 	for _, req := range client.requests {
 		if req.URL == codexProbeEndpoint {
-			t.Fatal("probe sent despite local usage history; upstream 0% alone must not decide freshness")
+			probes++
 		}
+	}
+	if probes != 1 {
+		t.Errorf("kick sent %d times, want exactly 1: a reset window needs its countdown started even with past usage", probes)
+	}
+	if e, ok := ledger.Get("auth-1"); !ok || !e.Probed {
+		t.Error("ledger should be marked probed after the kick")
 	}
 }
 
-func TestRefresherProbeWhenLedgerClean(t *testing.T) {
+func TestRefresherKickWhenLedgerClean(t *testing.T) {
 	client := &fakeHostClient{
 		auths:    []AuthEntry{{ID: "auth-1", AuthIndex: "0", Provider: "codex"}},
 		authJSON: map[string]json.RawMessage{"0": json.RawMessage(`{"access_token":"tok-a"}`)},
-		usage:    map[string][]byte{"tok-a": []byte(freshUsage)},
+		usage:    map[string][]byte{"tok-a": []byte(resetUsage)},
 	}
 	store := NewStore()
 	ledger := NewLedger() // no history: never used through CPA
@@ -369,9 +378,54 @@ func TestRefresherProbeWhenLedgerClean(t *testing.T) {
 		}
 	}
 	if probes != 1 {
-		t.Errorf("probe sent %d times, want exactly 1 for a never-used profile", probes)
+		t.Errorf("kick sent %d times, want exactly 1 for a window with no countdown", probes)
 	}
-	if e, ok := ledger.Get("auth-1"); !ok || !e.Probed {
-		t.Error("ledger should be marked probed after the background probe")
+}
+
+func TestRefresherNoKickWhenCountdownRunning(t *testing.T) {
+	// 100% but the countdown is already running (future reset_at, built
+	// dynamically so the test doesn't rot).
+	futureReset := time.Now().Add(7 * 24 * time.Hour).UTC().Format(time.RFC3339)
+	usage := []byte(fmt.Sprintf(`{"plan_type":"pro","rate_limit":{` +
+		`"secondary_window":{"used_percent":0,"limit_window_seconds":604800,"reset_at":%q}}}`,
+		futureReset))
+	client := &fakeHostClient{
+		auths:    []AuthEntry{{ID: "auth-1", AuthIndex: "0", Provider: "codex"}},
+		authJSON: map[string]json.RawMessage{"0": json.RawMessage(`{"access_token":"tok-a"}`)},
+		usage:    map[string][]byte{"tok-a": usage},
+	}
+	store := NewStore()
+	cfg := testConfig()
+	cfg.ProbeFresh = true
+	r := NewRefresher(client, store, NewLedger(), func() Config { return cfg })
+	r.spread = time.Millisecond
+	r.RefreshOnce()
+
+	for _, req := range client.requests {
+		if req.URL == codexProbeEndpoint {
+			t.Fatal("kick sent while the window countdown is already running")
+		}
+	}
+}
+
+func TestShouldKick_StaleSnapshot(t *testing.T) {
+	zero := 0.0
+	now := time.Now()
+	r := NewRefresher(nil, NewStore(), NewLedger(), testConfig)
+
+	// Usage observed after the fetch: the snapshot is stale, that usage
+	// already started a countdown.
+	r.ledger.Observe(UsageObservation{AuthID: "auth-1", ObservedAt: now.Add(time.Hour)})
+	snap := Snapshot{AuthID: "auth-1", FetchedAt: now,
+		Long: &Window{UsedPercent: &zero}}
+	if r.shouldKick("auth-1", snap) {
+		t.Error("shouldKick = true with usage newer than the snapshot")
+	}
+
+	// Usage older than the fetch: snapshot is current, kick is due.
+	r2 := NewRefresher(nil, NewStore(), NewLedger(), testConfig)
+	r2.ledger.Observe(UsageObservation{AuthID: "auth-1", ObservedAt: now.Add(-time.Hour)})
+	if !r2.shouldKick("auth-1", snap) {
+		t.Error("shouldKick = false with no usage since the fetch")
 	}
 }

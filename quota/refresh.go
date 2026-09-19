@@ -78,8 +78,10 @@ type Config struct {
 	Enabled   bool
 	Providers []string
 	Interval  time.Duration
-	// ProbeFresh sends one minimal "ping" request when a never-used long
-	// window is detected, starting its countdown.
+	// ProbeFresh sends one minimal "hi" request when a refresh shows a
+	// long window at ~100% with no countdown running. For Codex each
+	// window's countdown starts on first token use, so the "hi" starts the
+	// new window's countdown and makes its reset time known.
 	ProbeFresh bool
 	// MaxStale caps how old a snapshot may get before it is re-fetched even
 	// when nothing else changed. Zero means defaultMaxStale.
@@ -101,7 +103,6 @@ type Refresher struct {
 	running  bool
 	stop     chan struct{}
 	wg       sync.WaitGroup
-	probed   map[string]bool
 	onDemand map[string]time.Time
 	// nextOnDemand is the earliest time an on-demand fetch may start; it
 	// enforces the minimum spacing between on-demand fetches across
@@ -123,7 +124,6 @@ func NewRefresher(client HostClient, store *Store, ledger *Ledger, config func()
 		store:    store,
 		ledger:   ledger,
 		config:   config,
-		probed:   make(map[string]bool),
 		failedAt: make(map[string]time.Time),
 		spread:   defaultSpreadWindow,
 		fetchGap: onDemandMinInterval,
@@ -386,41 +386,42 @@ func (r *Refresher) refreshOne(auth AuthEntry, cfg Config) {
 	r.clearFailure(auth.ID)
 	r.store.Set(snap)
 
-	// Probe only a profile with no local usage history: upstream
-	// used_percent rounds tiny usage to 0%, so it alone cannot prove the
-	// profile was never used. All usage flows through CPA, so the ledger
-	// is authoritative.
-	if cfg.ProbeFresh && snap.Fresh() && r.noLocalHistory(auth.ID) {
-		r.mu.Lock()
-		already := r.probed[auth.ID]
-		if !already {
-			r.probed[auth.ID] = true
-		}
-		r.mu.Unlock()
-		if !already {
-			if creds, err := CredentialsForAuth(r.client, auth); err == nil {
-				ProbeFreshWindow(r.client.DoHTTP, creds)
-				if r.ledger != nil {
-					r.ledger.MarkProbed(auth.ID)
-				}
+	// Kick off the long window's countdown when it isn't running: for
+	// Codex each window's countdown starts on first token use, so a
+	// refresh showing ~100% with no future reset_at means the new window
+	// hasn't started. One minimal "hi" starts it, making the reset time
+	// known for reset-soonest ordering. This is per window, not once
+	// ever: every reset window needs its own kick.
+	if cfg.ProbeFresh && r.shouldKick(auth.ID, snap) {
+		if creds, err := CredentialsForAuth(r.client, auth); err == nil {
+			ProbeFreshWindow(r.client.DoHTTP, creds)
+			if r.ledger != nil {
+				r.ledger.MarkProbed(auth.ID)
 			}
 		}
-	} else if !snap.Fresh() {
-		r.mu.Lock()
-		delete(r.probed, auth.ID)
-		r.mu.Unlock()
 	}
 }
 
-// noLocalHistory reports whether the usage-feedback ledger holds no record
-// of the profile ever being used. A nil ledger (tests) means no history is
-// known, preserving the snapshot-only check.
-func (r *Refresher) noLocalHistory(authID string) bool {
-	if r.ledger == nil {
-		return true
+// shouldKick reports whether the profile's long-window countdown needs
+// starting. Upstream used_percent rounds tiny usage to 0%, so "100%"
+// alone can't tell "never used" from "just reset" — but the kick is due
+// in both cases: any window without a running countdown gets one. A
+// future reset_at means the countdown is already running. Ledger usage
+// newer than the snapshot means the snapshot is stale (that usage
+// already started a countdown), so don't kick on stale data.
+func (r *Refresher) shouldKick(authID string, snap Snapshot) bool {
+	if !snap.Fresh() {
+		return false
 	}
-	e, ok := r.ledger.Get(authID)
-	return !ok || e.Fresh()
+	if snap.Long != nil && snap.Long.ResetAt.After(time.Now()) {
+		return false
+	}
+	if r.ledger != nil {
+		if e, ok := r.ledger.Get(authID); ok && e.LastObserved.After(snap.FetchedAt) {
+			return false
+		}
+	}
+	return true
 }
 
 func filterAuths(auths []AuthEntry, providers []string) []AuthEntry {

@@ -41,6 +41,16 @@ const exhaustedUsage = `{
 	}
 }`
 
+// resetUsage: long window back at 100% with no reset_at — the new window's
+// countdown hasn't started (Codex starts it on first token use).
+const resetUsage = `{
+	"plan_type": "pro",
+	"rate_limit": {
+		"primary_window": {"used_percent": 0, "limit_window_seconds": 18000, "reset_at": "2026-09-18T20:00:00Z"},
+		"secondary_window": {"used_percent": 0, "limit_window_seconds": 604800}
+	}
+}`
+
 func TestParseUsage(t *testing.T) {
 	parsed, err := ParseUsage([]byte(sampleUsage), time.Now())
 	if err != nil {
@@ -224,7 +234,8 @@ func TestRefresherProbeFresh(t *testing.T) {
 	client := &fakeHostClient{
 		auths:    []AuthEntry{{ID: "auth-1", AuthIndex: "0", Provider: "codex"}},
 		authJSON: map[string]json.RawMessage{"0": json.RawMessage(`{"access_token":"tok-a"}`)},
-		usage:    map[string][]byte{"tok-a": []byte(freshUsage)},
+		// 100% with no reset_at: the new window's countdown hasn't started.
+		usage: map[string][]byte{"tok-a": []byte(resetUsage)},
 	}
 	store := NewStore()
 	cfg := testConfig()
@@ -232,7 +243,7 @@ func TestRefresherProbeFresh(t *testing.T) {
 	r := NewRefresher(client, store, nil, func() Config { return cfg })
 	r.spread = time.Millisecond
 	r.RefreshOnce()
-	r.RefreshOnce() // second cycle must not probe again
+	r.RefreshOnce() // second cycle is not due: must not kick again
 
 	probes := 0
 	for _, req := range client.requests {
