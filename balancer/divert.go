@@ -31,11 +31,13 @@ const (
 	minGlobalSamples = 10
 	// defaultCalibrationTimeout is how long a calibration mark may wait
 	// for a small-key request before any key's request may be borrowed.
-	defaultCalibrationTimeout = 6 * time.Hour
+	// Borrowing spends the user's own real traffic, so the wait is short:
+	// a mark older than this borrows whatever request comes next.
+	defaultCalibrationTimeout = 5 * time.Minute
 	// divertAttemptCooldown spaces repeated borrow attempts for one
 	// account: a borrowed request that taught us nothing (non-quota
 	// failure) doesn't immediately cost the user another one.
-	divertAttemptCooldown = 10 * time.Minute
+	divertAttemptCooldown = 5 * time.Minute
 )
 
 // tokenWindow is a bounded ring of token counts with a running sum, so

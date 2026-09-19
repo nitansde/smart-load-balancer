@@ -133,7 +133,7 @@ func TestDivert_BigKeyWaitsForTimeout(t *testing.T) {
 		t.Fatal("big key must not be diverted while the mark is fresh")
 	}
 	// After the timeout with no small-key traffic, any key may be borrowed.
-	d.Pending.marks["target"].markedAt = now.Add(-7 * time.Hour)
+	d.Pending.marks["target"].markedAt = now.Add(-6 * time.Minute)
 	got, _ = b.PickWithQuota("big", cands, cfg, stubResolver{})
 	if got != "target" {
 		t.Fatalf("timed-out mark should divert any key, got %q", got)
