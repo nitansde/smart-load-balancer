@@ -68,7 +68,7 @@ import (
 
 const (
 	pluginID      = "smart-load-balancer"
-	pluginVersion = "0.1.0"
+	pluginVersion = "0.1.1"
 	pluginAuthor  = "nitansde"
 	pluginRepo    = "https://github.com/nitansde/smart-load-balancer"
 	// quotaProviderIdentifier is the provider key this plugin serves
@@ -406,12 +406,12 @@ func pluginRegistration() registration {
 				{
 					Name:        "enabled",
 					Type:        pluginapi.ConfigFieldTypeBoolean,
-					Description: "Master switch. When off, the plugin declines every pick and the host falls back to its default scheduler.",
+					Description: "总开关。关闭后插件放弃每次调度决策，主机回退到默认调度器。Master switch. When off, the plugin declines every pick and the host falls back to its default scheduler.",
 				},
 				{
 					Name:        "sticky_ttl_seconds",
 					Type:        pluginapi.ConfigFieldTypeInteger,
-					Description: "How long an idle sticky assignment is kept, in seconds. Defaults to 24h (86400). After expiry the client's most recently used profile is still preferred (soft preference).",
+					Description: "空闲的粘性绑定保留时长（秒），默认 24h（86400）。过期后该客户端上次用过的 profile 仍会被优先考虑（弱偏好）。How long an idle sticky assignment is kept, in seconds. Defaults to 24h (86400). After expiry, the last-used profile of the client is still preferred as a soft hint.",
 				},
 			},
 		},
