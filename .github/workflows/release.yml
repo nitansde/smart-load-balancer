@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  build-ubuntu:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -25,15 +25,60 @@ jobs:
           done
           sudo apt-get install -y gcc-aarch64-linux-gnu gcc-mingw-w64-x86-64 zip
 
-      - name: Install zig (darwin cross builds)
+      - name: Install zig (windows-arm64 cross build)
         uses: mlugg/setup-zig@v1
         with:
           version: 0.13.0
 
-      - name: Build and package
+      - name: Build linux + windows artifacts
+        run: |
+          rm -rf dist && make dist-linux dist-windows
+          find dist -type f | sort
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-ubuntu
+          path: dist/
+          if-no-files-found: error
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - name: Build darwin artifacts (native toolchain)
+        run: |
+          rm -rf dist && make dist-darwin
+          find dist -type f | sort
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-darwin
+          path: dist/
+          if-no-files-found: error
+
+  release:
+    needs: [build-ubuntu, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Package zips + checksums
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          make zip VERSION="$VERSION"
+          make package VERSION="$VERSION"
           ls -la dist/
 
       - name: Publish GitHub release

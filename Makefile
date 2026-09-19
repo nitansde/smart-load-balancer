@@ -6,7 +6,7 @@ DIST := dist
 
 GO := go
 
-.PHONY: all build test vet fmt clean dist zip help
+.PHONY: all build test vet fmt clean dist dist-linux dist-windows dist-darwin package zip help
 
 all: build
 
@@ -31,24 +31,36 @@ fmt:
 clean:
 	rm -rf $(DIST) $(PLUGIN_ID).so $(PLUGIN_ID).dylib $(PLUGIN_ID).dll $(PLUGIN_ID).h
 
-## Cross-compile all release artifacts into $(DIST)/
-## Requires: zig (darwin/windows), aarch64-linux-gnu-gcc (linux/arm64)
-## Darwin note: Go unconditionally passes -lresolv when linking for macOS, but
-## references no resolv symbols (they live in libSystem). zig's bundled macOS
-## SDK has no libresolv, so we provide an empty stub archive for the linker.
-dist:
-	rm -rf $(DIST) && mkdir -p $(DIST)/fakelib
-	(cd $(DIST)/fakelib && ar crus libresolv.a)
+## Cross-compile release artifacts into $(DIST)/
+##   dist-linux / dist-windows: buildable on Linux.
+##     Requires: aarch64-linux-gnu-gcc (linux/arm64), mingw-w64 (windows/amd64),
+##     zig (windows/arm64).
+##   dist-darwin: requires a real macOS SDK — run on a Mac with Xcode CLT.
+##     (zig's bundled macOS SDK has no frameworks, so cross-compiling darwin
+##     dylibs from Linux is not supported.)
+## Full 6-platform zips are assembled by the release workflow (ubuntu +
+## macos jobs) via the `package` target.
+dist: dist-linux dist-windows
+
+dist-linux:
+	mkdir -p $(DIST)
 	CGO_ENABLED=1 GOOS=linux GOARCH=amd64 $(GO) build -buildmode=c-shared -o $(DIST)/linux-amd64/$(PLUGIN_ID).so .
 	CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc $(GO) build -buildmode=c-shared -o $(DIST)/linux-arm64/$(PLUGIN_ID).so .
-	CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 CC="zig cc -target x86_64-macos" CGO_LDFLAGS="-L$(CURDIR)/$(DIST)/fakelib" $(GO) build -buildmode=c-shared -o $(DIST)/darwin-amd64/$(PLUGIN_ID).dylib .
-	CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 CC="zig cc -target aarch64-macos" CGO_LDFLAGS="-L$(CURDIR)/$(DIST)/fakelib" $(GO) build -buildmode=c-shared -o $(DIST)/darwin-arm64/$(PLUGIN_ID).dylib .
+
+dist-windows:
+	mkdir -p $(DIST)
 	CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc $(GO) build -buildmode=c-shared -o $(DIST)/windows-amd64/$(PLUGIN_ID).dll .
 	CGO_ENABLED=1 GOOS=windows GOARCH=arm64 CC="zig cc -target aarch64-windows-gnu" $(GO) build -buildmode=c-shared -o $(DIST)/windows-arm64/$(PLUGIN_ID).dll .
 
-## Package release zips in the CLIProxyAPI store layout:
+dist-darwin:
+	mkdir -p $(DIST)
+	CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 $(GO) build -buildmode=c-shared -o $(DIST)/darwin-arm64/$(PLUGIN_ID).dylib .
+	CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 CC="clang -arch x86_64" $(GO) build -buildmode=c-shared -o $(DIST)/darwin-amd64/$(PLUGIN_ID).dylib .
+
+## Package release zips in the CLIProxyAPI store layout from the already-built
+## $(DIST)/<goos>-<goarch>/ libraries (no compilation here):
 ##   <id>_<version>_<goos>_<goarch>.zip  (library at zip root) + checksums.txt
-zip: dist
+package:
 	@set -e; \
 	for target in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64 windows-arm64; do \
 		goos=$${target%-*}; goarch=$${target#*-}; \
@@ -59,6 +71,9 @@ zip: dist
 		echo "packed $(DIST)/$$zipname"; \
 	done; \
 	(cd $(DIST) && sha256sum *.zip > checksums.txt && cat checksums.txt)
+
+## Local shortcut: build what this machine can and package it.
+zip: dist package
 
 help:
 	@echo "Targets: build test vet fmt clean dist zip"
