@@ -69,11 +69,6 @@ type Balancer struct {
 	now    func() time.Time
 	picks  []pickRecord
 	sticky map[string]stickyEntry
-	// lastPicked is the round-robin cursor: the most recent fresh pick.
-	// Within a tier of candidates tied on every ranking key, selection
-	// takes the first candidate after lastPicked (wrapping around),
-	// mirroring CPA's default scheduler.
-	lastPicked string
 }
 
 // New returns a Balancer using the real clock.
@@ -148,9 +143,8 @@ func (b *Balancer) Pick(keyHash string, candidates []Candidate, cfg Config) (str
 //     consumed tokens desc, never-used last,
 //     f. unknown: host priority tier, higher first (CPA's direction),
 //     g. fewest other-key sticky owners first,
-//     h. least recent load, then ID natural order with round-robin
-//     rotation, mirroring CPA's default scheduler (priority tiers, then
-//     ID order, then round-robin within the tier).
+//     h. least recent load, then natural ID order, first wins
+//     (fill-first).
 //     The strategy setting is accepted for compatibility but ignored:
 //     tiers are strict (the best tier always wins); rotation only happens
 //     among candidates tied on every ranking key.
@@ -172,10 +166,7 @@ func (b *Balancer) PickWithQuota(keyHash string, candidates []Candidate, cfg Con
 		return "", false
 	}
 	if len(eligible) == 1 {
-		b.mu.Lock()
-		b.lastPicked = eligible[0].ID
-		b.recordLocked(eligible[0].ID, keyHash, b.now(), cfg)
-		b.mu.Unlock()
+		b.record(eligible[0].ID, keyHash, cfg)
 		return eligible[0].ID, true
 	}
 
@@ -211,19 +202,9 @@ func (b *Balancer) PickWithQuota(keyHash string, candidates []Candidate, cfg Con
 
 	rs := newRankState(eligible, cfg, resolver, loads, owners)
 	ranked := rs.sorted(eligible)
-	// CPA's default scheduler rotates (round-robin) within a tier of
-	// tied candidates: take the first tier entry after the last pick,
-	// wrapping around. The strategy setting stays ignored: tiers are
-	// strict, rotation only happens among candidates tied on every key.
-	tier := rs.topTier(ranked)
-	chosen := tier[0].ID
-	for _, c := range tier {
-		if naturalIDLess(b.lastPicked, c.ID) {
-			chosen = c.ID
-			break
-		}
-	}
-	b.lastPicked = chosen
+	// Fill-first on ties: take the head of the ranking. The strategy
+	// setting stays ignored.
+	chosen := ranked[0].ID
 	b.recordLocked(chosen, keyHash, now, cfg)
 	return chosen, true
 }
@@ -360,16 +341,6 @@ func (s *rankState) sorted(candidates []Candidate) []Candidate {
 	return ranked
 }
 
-// topTier returns the maximal prefix of ranked candidates that tie with
-// the head on every ranking key: the rotation set for round-robin
-// selection.
-func (s *rankState) topTier(ranked []Candidate) []Candidate {
-	end := 1
-	for end < len(ranked) && s.compare(ranked[0], ranked[end]) == 0 {
-		end++
-	}
-	return ranked[:end]
-}
 
 // resetTieWindow is the tolerance within which two long-window reset
 // moments count as the same reset: the scheduler treats them as one tier
@@ -422,7 +393,6 @@ func (b *Balancer) Reset() {
 	defer b.mu.Unlock()
 	b.picks = nil
 	b.sticky = make(map[string]stickyEntry)
-	b.lastPicked = ""
 }
 
 // LoadSnapshot reports the current per-profile pick counts inside the window.

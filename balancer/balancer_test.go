@@ -310,26 +310,26 @@ func TestConfigDefaultsAndValidation(t *testing.T) {
 	}
 }
 
-// CPA-style tie-break: candidates tied on every ranking key rotate
-// round-robin in ID order (CPA's default scheduler semantics).
-func TestRoundRobinWithinTiedTier(t *testing.T) {
+// Fill-first on ties: candidates tied on every ranking key keep ID
+// order and the head always wins.
+func TestFillFirstWithinTiedTier(t *testing.T) {
 	b, _ := newTestBalancer()
 	cfg := testConfig()
-	cfg.Sticky = false // isolate rotation from the sticky fast path
+	cfg.Sticky = false // isolate the tie-break from the sticky fast path
 	candidates := codexCandidates(3)
 
-	var got []string
 	for i := 0; i < 4; i++ {
-		id, ok := b.Pick("key", candidates, cfg)
+		got, ok := b.Pick("key", candidates, cfg)
 		if !ok {
 			t.Fatalf("pick %d not handled", i)
 		}
-		got = append(got, id)
-	}
-	want := []string{"codex-profile-0", "codex-profile-1", "codex-profile-2", "codex-profile-0"}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("pick %d = %q, want %q (full sequence %v)", i, got[i], want[i], got)
+		// The second pick sees profile-0 with load 1, so the tier is
+		// [profile-1, profile-2] and profile-1 wins; the third sees
+		// [profile-2]; the fourth sees all loads tied and wraps back
+		// to profile-0.
+		want := []string{"codex-profile-0", "codex-profile-1", "codex-profile-2", "codex-profile-0"}[i]
+		if got != want {
+			t.Fatalf("pick %d = %q, want %q", i, got, want)
 		}
 	}
 }
