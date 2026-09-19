@@ -407,9 +407,9 @@ func (r *Refresher) refreshOne(auth AuthEntry, cfg Config) {
 // kickTolerance bounds how far the reset interval may fall short of the
 // full window length while still counting as "countdown not started".
 // An idle window's reset_at rolls forward on every fetch, so the measured
-// interval jitters by fetch latency; an hour is generous without
+// interval jitters by fetch latency; five minutes covers that without
 // misjudging a countdown that has been running for a while.
-const kickTolerance = time.Hour
+const kickTolerance = 5 * time.Minute
 
 // shouldKick reports whether the long window's countdown needs starting.
 // Codex keeps reset_at about one full window in the future while the
