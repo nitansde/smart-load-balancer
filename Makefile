@@ -33,12 +33,16 @@ clean:
 
 ## Cross-compile all release artifacts into $(DIST)/
 ## Requires: zig (darwin/windows), aarch64-linux-gnu-gcc (linux/arm64)
+## Darwin note: Go unconditionally passes -lresolv when linking for macOS, but
+## references no resolv symbols (they live in libSystem). zig's bundled macOS
+## SDK has no libresolv, so we provide an empty stub archive for the linker.
 dist:
-	rm -rf $(DIST) && mkdir -p $(DIST)
+	rm -rf $(DIST) && mkdir -p $(DIST)/fakelib
+	(cd $(DIST)/fakelib && ar crus libresolv.a)
 	CGO_ENABLED=1 GOOS=linux GOARCH=amd64 $(GO) build -buildmode=c-shared -o $(DIST)/linux-amd64/$(PLUGIN_ID).so .
 	CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc $(GO) build -buildmode=c-shared -o $(DIST)/linux-arm64/$(PLUGIN_ID).so .
-	CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 CC="zig cc -target x86_64-macos" $(GO) build -buildmode=c-shared -o $(DIST)/darwin-amd64/$(PLUGIN_ID).dylib .
-	CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 CC="zig cc -target aarch64-macos" $(GO) build -buildmode=c-shared -o $(DIST)/darwin-arm64/$(PLUGIN_ID).dylib .
+	CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 CC="zig cc -target x86_64-macos" CGO_LDFLAGS="-L$(CURDIR)/$(DIST)/fakelib" $(GO) build -buildmode=c-shared -o $(DIST)/darwin-amd64/$(PLUGIN_ID).dylib .
+	CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 CC="zig cc -target aarch64-macos" CGO_LDFLAGS="-L$(CURDIR)/$(DIST)/fakelib" $(GO) build -buildmode=c-shared -o $(DIST)/darwin-arm64/$(PLUGIN_ID).dylib .
 	CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc $(GO) build -buildmode=c-shared -o $(DIST)/windows-amd64/$(PLUGIN_ID).dll .
 	CGO_ENABLED=1 GOOS=windows GOARCH=arm64 CC="zig cc -target aarch64-windows-gnu" $(GO) build -buildmode=c-shared -o $(DIST)/windows-arm64/$(PLUGIN_ID).dll .
 
