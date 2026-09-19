@@ -2,94 +2,125 @@
 
 # Smart Load Balancer
 
-A [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) plugin that replaces the default auth-scheduling policy with a load-aware one.
+A [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) plugin that gives every client API key its own upstream profile — with quota-aware routing, instead of everyone piling onto the same one.
 
-## The problem
+## The problem, in 30 seconds
 
-With several client API keys and several upstream auth profiles (for example 8 Codex profiles), the built-in scheduler tends to place concurrent requests from different keys onto the **same** profile. That wastes the other profiles, lowers effective concurrency, and thrashes prompt caches.
+Say you have 3 API keys (your laptop, your home server, a CI job) and 3 Codex accounts behind CLIProxyAPI:
 
-## What it does
+```
+WITHOUT this plugin                 WITH this plugin
 
-When enabled, every auth pick goes through this plugin instead of the default scheduler:
+key laptop ──┐                      key laptop ──▶ profile 1 (sticky)
+key server ──┼──▶ profile 1         key server ──▶ profile 2 (sticky)
+key CI     ──┘      (crowded!)      key CI     ──▶ profile 3 (sticky)
+             profile 2, 3 sit idle
+```
 
-- **Quota-aware ordering** — profiles are ranked by quota state: your `quota_priorities` first, then the long-window (weekly/monthly) reset-soonest profile, then fill-first inside each reset tier (highest precise `used_percent`, else highest ledger-consumed tokens). Quota that renews soon is spent before quota with a distant reset.
-- **No-conflict guarantee** — a profile holding another client key's active sticky is never taken while any unclaimed profile exists, so simultaneous requests from different keys land on different profiles.
-- **Per-key stickiness** — a client API key is pinned to one profile while that profile stays healthy (24h idle TTL by default, adjustable), keeping its prompt cache warm. If the pinned profile is blocked or exhausted the key transparently fails over; if it gets saturated the key spills over to the least-loaded one.
-- **Last-used preference** — after the sticky TTL expires, the client's most recently used profile is still preferred as a soft ranking hint. It never overrides the no-conflict guarantee or quota ordering.
-- **Fill-first tie-breaking** — candidates tied on every ranking key keep natural ID order (`profile-2` before `profile-10`) and the head always wins. The `strategy` setting is accepted for compatibility but ignored.
+The built-in scheduler tends to stack concurrent keys onto the same profile. The other profiles sit idle, your effective concurrency is capped by one account's limits, and prompt caches get thrashed as different conversations fight over the same account.
 
-Client identity is derived as a SHA-256 hash of the inbound `Authorization` (or `X-Api-Key`) header. Raw key material is never stored or logged.
+This plugin pins each key to its own profile and keeps it there while it's healthy. If the profile runs dry or errors, the key moves on its own — no manual juggling.
+
+## How it picks a profile
+
+```
+a request from key K arrives
+        │
+        ▼
+does K already have a sticky profile?
+  │ yes                    │ no
+  ▼                        ▼
+is it still healthy?    rank every profile — top one wins:
+  │ yes     │ no          1. your quota_priorities (your VIP list)
+  ▼         ▼             2. not claimed by another key right now
+use it   fail over        3. quota known beats quota unknown
+(cache stays warm)        4. resets soonest first — spend quota that renews soon
+                          5. most-used first — fill it up before it resets
+                          6. host priority, least load, last-used, ID order…
+                        remember the winner as K's sticky profile
+```
+
+In plain terms: it spends quota that's about to renew before quota with a distant reset, never steals a profile another key is actively using while a free one exists, and keeps each key on the same profile so prompt caches stay warm.
+
+## Where quota numbers come from
+
+No hot polling. Quota arrives three ways:
+
+```
+every request ──▶ usage.handle ──▶ ledger: tokens spent, 429 blocks
+                       │
+                       └──▶ response headers: precise used% + reset time
+                            (upstream quota events ride along for free)
+
+you click "refresh" ──▶ quota.fetch ──▶ upstream ──▶ snapshot store
+in the management UI      (only when you ask)
+
+slow safety net: a background re-check every 72h, plus an instant
+re-check when a window reset is noticed (both can be turned off)
+```
+
+A `429` from upstream is classified, not just retried: an explicit weekly/monthly exhaustion blocks the profile until the window ends; a quota failure that names no window backs off 5 hours; a clearly transient limit (e.g. too many concurrent requests) doesn't block at all.
 
 ## Install
 
-### From the plugin store (recommended)
+### Option A — plugin store (recommended, no build needed)
 
-Once published to the official store, install from the CLIProxyAPI management UI or CLI by searching for `smart-load-balancer`.
+Point CLIProxyAPI at this plugin's registry in `config.yaml`, restart, then install `smart-load-balancer` from the management UI's plugin store:
 
-### Manual
+```yaml
+plugins:
+  store-sources:
+    - "https://raw.githubusercontent.com/nitansde/smart-load-balancer/main/registry.json"
+```
 
-1. Build the shared library for your platform:
-   ```bash
-   make build
-   # produces smart-load-balancer.so (.dylib on macOS, .dll on Windows)
-   ```
-2. Copy it into your CLIProxyAPI `plugins` directory.
+### Option B — manual build
+
+1. `make build` → `smart-load-balancer.so` (`.dylib` on macOS, `.dll` on Windows)
+2. Copy it into CLIProxyAPI's `plugins` directory.
 3. Add to `config.yaml`:
    ```yaml
    plugins:
      enabled: true
      configs:
        smart-load-balancer:
-         enabled: true             # master switch; off = host default scheduler
-         sticky_ttl_seconds: 86400  # 24h (default)
+         enabled: true
+         sticky_ttl_seconds: 86400  # 24h default
    ```
-   The management UI exposes only these two options. Everything else (providers, quota calibration interval, spillover threshold, …) keeps its built-in defaults.
 4. Restart CLIProxyAPI.
 
 ## Configuration
 
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `enabled` | bool | `true` | Master switch. When off, the plugin declines every pick and the host falls back to its default scheduler. |
-| `sticky_ttl_seconds` | int | `86400` (24h) | How long an idle sticky assignment is kept. |
+The management UI shows only two options; everything else keeps sane built-in defaults:
 
-All other knobs keep their built-in defaults and are intentionally hidden from the UI. They remain settable via hand-edited `config.yaml` if you ever need them: `providers`, `strategy` (accepted, ignored), `sticky`, `window_seconds` (120), `max_inflight_per_profile` (8), `quota_enabled` (true), `quota_providers`, `quota_refresh_seconds` (72h), `quota_probe_fresh` (true), `quota_priorities`.
+| Field | Default | What it does |
+|---|---|---|
+| `enabled` | `true` | Master switch. Off = the plugin steps aside and the host's default scheduler takes over. |
+| `sticky_ttl_seconds` | `86400` (24h) | How long an idle key stays pinned to its profile. |
 
-If no candidate matches `providers`, or no candidates are offered at all, the plugin declines the pick and the host falls back to its default scheduling — requests are never broken by this plugin.
+<details>
+<summary>Advanced knobs (only if you hand-edit config.yaml)</summary>
 
-## How quota-aware scheduling works
+`providers`, `strategy` (accepted but ignored), `sticky`, `window_seconds` (120), `max_inflight_per_profile` (8), `quota_enabled` (true), `quota_providers`, `quota_refresh_seconds` (72h, `0` disables), `quota_probe_fresh` (true), `quota_priorities`.
 
-The plugin registers three capabilities: `scheduler`, `usage_plugin`, and `quota_provider`.
+</details>
 
-**Usage feedback is the primary quota signal — no polling.** After every request the host calls `usage.handle` with a usage record. The plugin keeps a per-profile ledger: successful requests accumulate consumed tokens, and upstream `429` failures are classified:
+## Details
 
-- an explicit weekly/monthly exhaustion signal blocks the profile until the estimated window end;
-- a quota failure that names no window backs off 5 hours, then retries;
-- a clearly transient rate limit (e.g. concurrency) does not block at all.
-
-A profile never scheduled through this plugin is assumed at 100% remaining; the scheduler owns all routing, so its own ledger is authoritative and drift is corrected by calibration.
-
-**Quota-aware ordering.** On each pick, blocked profiles are excluded first. A client's sticky profile is kept while it stays healthy (prompt-cache affinity, 24h idle TTL by default); on block or exhaustion the client fails over. Fresh selection ranks profiles: your `quota_priorities` order first; then profiles claimed by other client keys sort after every unclaimed profile (no-conflict is guaranteed while any unclaimed profile exists — only when all candidates are claimed does fewest-claimed win); then quota-known profiles before unknown ones; then long-window-reset-soonest first (the long window is weekly or monthly, whichever the account is on; reset moments within 1 hour count as the same moment; profiles without a known reset rank after those with one); then fill-first inside each reset tier (highest precise `used_percent`, else highest ledger-consumed tokens, never-used last); then, for unknown-quota profiles, host priority tier (higher first, mirroring CPA's default scheduler); then least recent load; then the client's most recently used profile (soft preference only — never overrides the no-conflict guarantee or quota ordering); then natural ID order with fill-first (the tied head always wins). The `strategy` setting is accepted for compatibility but ignored.
-
-**Precise quota is on-demand calibration.** The plugin implements the `quota_provider` capability, so when you manually refresh a credential's quota in the management UI, the host calls this plugin's `quota.fetch` — which updates the scheduler's snapshot store as a side effect. One code path, never duplicated work. Background calibration defaults to every 72h and can be turned off entirely (`quota_refresh_seconds: 0`) if you only want manual refreshes. Each calibration cycle staggers its per-profile fetches across a 6-hour window (profile count determines the spacing), so profiles never hit the upstream endpoint at once. Every completed request also harvests quota passively: the host merges the upstream quota event into the response headers handed to `usage.handle`, so each request carries its profile's latest window numbers with zero extra fetches. Active profiles stay calibrated from traffic alone.
-
-Independently of the background cycle, whenever a pick sees that a profile's long-window (weekly or monthly) reset time has already passed, the plugin queues a background re-fetch of that profile's quota (single-flighted per profile, at least 10 minutes apart across profiles) instead of trusting the stale snapshot. A failed fetch cools that profile down for 5 hours before any path retries it. The five-hour window is never re-fetched on its own: it is estimated locally from usage feedback, and a wrong estimate surfaces as a failed request, which the ledger turns into a five-hour block.
-
-## How it works
-
-The plugin implements the `scheduler.pick` capability. On each pick the host offers the eligible auth candidates (with their host priority tier and status) plus the inbound request headers; the plugin returns the chosen auth id. Load is estimated from the plugin's own recent picks inside `window_seconds` (self-healing: no cross-request bookkeeping can leak, and a restart simply starts with a clean slate).
+- **Client identity** is a SHA-256 hash of the inbound `Authorization` (or `X-Api-Key`) header. Raw key material is never stored or logged.
+- **It never breaks requests.** If no candidate matches, or the plugin is off, it declines the pick and the host falls back to its default scheduler.
+- **The `strategy` setting** is accepted for compatibility but ignored — the ranking above always decides.
+- **Starting a fresh quota window.** Codex only starts a window's countdown on first token use. When a refresh shows a long window whose reset is still a full window away (idle, never started), the plugin sends one minimal `hi` message to start the countdown — otherwise that reset time would never become real. One tiny request per window, never a poll loop.
+- **Ranking, precisely.** Fresh selection orders candidates: (1) your `quota_priorities`; (2) profiles claimed by other keys sort after unclaimed ones (only when every candidate is claimed does fewest-claimed win); (3) quota-known before unknown; (4) long-window (weekly/monthly) reset-soonest first — resets within 1 hour count as the same moment, unknown resets rank last; (5) fill-first within a tier: highest precise `used_percent`, else highest ledger token count, never-used last; (6) unknown-quota profiles follow host priority (higher first); (7) least recent load; (8) the key's last-used profile (soft hint only); (9) natural ID order, head wins.
 
 ## Development
 
 ```bash
-make test    # unit tests for the balancing core
+make test    # unit tests
 make vet     # go vet
-make build   # build the plugin for the host platform
-make dist    # cross-compile all 6 platform artifacts
-make zip VERSION=0.1.0  # package store-layout zips + checksums.txt
+make build   # build for this machine
+make dist    # cross-compile all 6 platforms
+make zip VERSION=0.1.0  # store-layout zips + checksums.txt
 ```
-
-An end-to-end check drives the compiled `.so` through the real C ABI (`plugin.register` → `scheduler.pick` → `plugin.reconfigure`) — see the test script used during development.
 
 ## License
 

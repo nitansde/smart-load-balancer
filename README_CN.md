@@ -2,94 +2,125 @@
 
 # Smart Load Balancer
 
-一个 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 插件，用额度感知、负载感知的路由策略替换默认的 auth 调度策略。
+一个 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 插件：让每个客户端 API Key 都有自己的上游 profile，额度感知地路由，而不是所有 Key 挤在同一个 profile 上。
 
-## 解决的问题
+## 30 秒讲清它解决什么问题
 
-当有多个客户端 API Key 和多个上游 auth profile（例如 8 个 Codex profile）时，内置调度器倾向于把不同 Key 的并发请求放到**同一个** profile 上。这浪费了其他 profile，降低了有效并发，还会冲掉 prompt 缓存。
+假设你有 3 个 API Key（笔记本、家里服务器、CI 任务），背后是 3 个 Codex 账号：
 
-## 功能
+```
+不用这个插件                      用了这个插件
 
-启用后，每次 auth 选择都会经过本插件，而不是默认调度器：
+key 笔记本 ──┐                    key 笔记本 ──▶ profile 1（固定）
+key 服务器 ──┼──▶ profile 1      key 服务器 ──▶ profile 2（固定）
+key CI     ──┘      （挤爆了！）  key CI     ──▶ profile 3（固定）
+             profile 2、3 空着
+```
 
-- **额度感知排序**——按额度状态给 profile 排序：先是你的 `quota_priorities`，然后是长窗口（周/月）reset 最早的，再在每个 reset tier 内 fill-first（精准 `used_percent` 高的优先，其次是账本累计 token 多的）。快到期的额度先用，离到期还远的后用。
-- **不冲突保证**——只要还有没被占用的 profile，就绝不会抢走别的 Key 的 sticky profile；不同 Key 的并发请求会自动落到不同的 profile 上。
-- **按 Key 粘性**——在 profile 健康的前提下，每个客户端 Key 会被固定到同一个 profile（默认空闲 24 小时，可调），prompt 缓存保持热度；如果该 profile 被 block 或耗尽，Key 会透明地 failover；如果过载，会溢出到负载最低的 profile。
-- **上次用过偏好**——sticky TTL 过期后，客户端上次用过的 profile 仍会作为一个弱排序偏好。它永远不会凌驾于不冲突保证和额度排序。
-- **Fill-first 平局打破**——在所有排序键上都打平的候选按自然 ID 排序（`profile-2` 排在 `profile-10` 前面），永远取第一个。`strategy` 设置会被接受但忽略。
+内置调度器容易把并发的 Key 全堆到同一个 profile 上：其他 profile 空转，有效并发被单个账号的限额卡死，不同 Key 的对话还会互相冲掉 prompt 缓存。
 
-客户端身份由入站 `Authorization`（或 `X-Api-Key`）头的 SHA-256 哈希派生，原始 Key 内容不会被存储或记录。
+这个插件把每个 Key 固定到自己的 profile 上，profile 健康就一直用；额度用完或出错，Key 自己搬家，不用你手动折腾。
+
+## 它怎么选 profile
+
+```
+key K 的请求来了
+        │
+        ▼
+K 已经有固定的 profile 了吗？
+  │ 有                      │ 没有
+  ▼                         ▼
+它还健康吗？              给所有 profile 打分排名，第一名获胜：
+  │ 健康    │ 不健康        1. 你的 quota_priorities（VIP 名单）
+  ▼         ▼               2. 没被别的 Key 占用的优先
+继续用   换一个             3. 额度已知的优先于未知的
+（缓存保持热度）            4. reset 最早的先用——先花快到期的额度
+                            5. 用得最多的先用——到期前把它填满
+                            6. host 优先级、负载、上次用过、ID 顺序……
+                          把获胜者记为 K 的固定 profile
+```
+
+一句话：快到期的额度先花，别人正在用的 profile 不抢（有空闲的话），每个 Key 固定在一个 profile 上让 prompt 缓存保持热度。
+
+## 额度数字从哪来
+
+没有高频轮询，额度从三个地方来：
+
+```
+每次请求 ──▶ usage.handle ──▶ 账本：花了多少 token、429 封禁
+                  │
+                  └──▶ 响应头：精准 used% + reset 时间
+                       （上游额度事件顺手捎带，零额外请求）
+
+你在管理界面点"刷新" ──▶ quota.fetch ──▶ 上游 ──▶ 快照库
+                        （只在你点的时候拉）
+
+慢速兜底：72 小时后台校准一次，发现窗口 reset 已过会立刻重拉
+（两个都可以关）
+```
+
+上游返回的 `429` 会分类处理，而不是无脑重试：明确的周/月额度耗尽就 block 到窗口结束；没指明窗口的额度失败退避 5 小时；明确的瞬时限流（比如并发超限）完全不 block。
 
 ## 安装
 
-### 从插件商店安装（推荐）
+### 方案 A —— 插件商店（推荐，不用自己编译）
 
-发布到官方商店后，在 CLIProxyAPI 管理界面或 CLI 中搜索 `smart-load-balancer` 安装。
+在 `config.yaml` 里加上本插件的 registry，重启 CLIProxyAPI，然后在管理界面的插件商店里安装 `smart-load-balancer`：
 
-### 手动安装
+```yaml
+plugins:
+  store-sources:
+    - "https://raw.githubusercontent.com/nitansde/smart-load-balancer/main/registry.json"
+```
 
-1. 为你的平台构建动态库：
-   ```bash
-   make build
-   # 生成 smart-load-balancer.so（macOS 为 .dylib，Windows 为 .dll）
-   ```
-2. 复制到 CLIProxyAPI 的 `plugins` 目录。
-3. 在 `config.yaml` 中添加：
+### 方案 B —— 手动编译
+
+1. `make build` → 得到 `smart-load-balancer.so`（macOS 是 `.dylib`，Windows 是 `.dll`）
+2. 复制到 CLIProxyAPI 的 `plugins` 目录
+3. 在 `config.yaml` 里添加：
    ```yaml
    plugins:
      enabled: true
      configs:
        smart-load-balancer:
-         enabled: true             # 总开关；关闭 = 走主机默认调度
-         sticky_ttl_seconds: 86400  # 24h（默认值）
+         enabled: true
+         sticky_ttl_seconds: 86400  # 默认 24h
    ```
-   管理界面只露出这两个选项。其他参数（provider 范围、额度校准间隔、溢出阈值等）都用内置默认值。
-4. 重启 CLIProxyAPI。
+4. 重启 CLIProxyAPI
 
 ## 配置
 
-| 字段 | 类型 | 默认值 | 说明 |
-|---|---|---|---|
-| `enabled` | bool | `true` | 总开关。关闭后插件放弃每次选择，主机回退到默认调度器。 |
-| `sticky_ttl_seconds` | int | `86400`（24h） | 空闲的粘性绑定保留多久（秒），管理界面可调。 |
+管理界面只露出两个选项，其他都用内置默认值：
 
-其他参数保持内置默认值，管理界面里刻意不露出。如有需要仍可手改 `config.yaml` 设置：`providers`、`strategy`（接受但忽略）、`sticky`、`window_seconds`（120）、`max_inflight_per_profile`（8）、`quota_enabled`（true）、`quota_providers`、`quota_refresh_seconds`（72h）、`quota_probe_fresh`（true）、`quota_priorities`。
+| 字段 | 默认值 | 说明 |
+|---|---|---|
+| `enabled` | `true` | 总开关。关闭 = 插件让位，主机用默认调度器。 |
+| `sticky_ttl_seconds` | `86400`（24h） | 空闲的 Key 在它的 profile 上固定多久。 |
 
-如果没有候选 profile 匹配 `providers`，或主机没有提供候选，插件会放弃本次决策，主机回退到默认调度——本插件永远不会弄坏请求。
+<details>
+<summary>高级参数（只有手改 config.yaml 才需要）</summary>
 
-## 额度感知调度的工作原理
+`providers`、`strategy`（接受但忽略）、`sticky`、`window_seconds`（120）、`max_inflight_per_profile`（8）、`quota_enabled`（true）、`quota_providers`、`quota_refresh_seconds`（72h，`0` 关闭）、`quota_probe_fresh`（true）、`quota_priorities`。
 
-插件注册了三个能力：`scheduler`、`usage_plugin` 和 `quota_provider`。
+</details>
 
-**用量反馈是主要的额度信号——无需轮询。** 每次请求结束后，主机都会调 `usage.handle` 送来一条用量记录。插件维护每个 profile 的账本：成功的请求累计消耗的 token，上游 `429` 按类型处理：
+## 细节
 
-- 明确的周/月额度耗尽信号：block 到窗口结束；
-- 没指明窗口的额度失败：退避 5 小时再试；
-- 明确的瞬时限流（例如并发超限）：不 block。
-
-没经过本插件调度过的 profile 默认按 100% 剩余处理；路由都由本插件负责，所以它自己的账本是权威的，漂移靠校准纠正。
-
-**额度感知排序。** 每次选择先排除被 block 的 profile。客户端的 sticky profile 在健康时会被保留（prompt 缓存亲和，默认空闲 24h）；被 block 或耗尽后自动 failover。Fresh 选择按以下顺序给 profile 排名：你的 `quota_priorities` 最先；然后被别的 Key 占用的 profile 排在所有没被占用的之后（不冲突保证：只要还有没被占用的就绝不抢；只有全部被占用时才按占用数最少的选）；然后已知额度的排在未知额度之前；然后长窗口 reset 最早的优先（长窗口是周或月，看账号类型；reset 时间差 1 小时内算同一时刻；没有已知 reset 的排在有 reset 的之后）；然后在每个 reset tier 内 fill-first（精准 `used_percent` 高的优先，其次账本累计 token 多的，从未用过的最后）；然后未知额度的按 host priority tier（数字大的优先，和 CPA 默认调度器一致）；然后近期负载最少的；然后客户端上次用过的 profile（纯弱偏好，绝不凌驾于不冲突保证和额度排序）；最后自然 ID 排序取第一个（fill-first）。`strategy` 设置会被接受但忽略。
-
-**精准额度是按需校准。** 插件实现了 `quota_provider` 能力，所以你在管理界面手动刷新某个凭证的额度时，主机调的是本插件的 `quota.fetch`——顺手就更新了调度器的快照，一套代码，没有重复劳动。后台校准默认 72 小时一次，也可以整个关掉（`quota_refresh_seconds: 0`），只用手动刷新。每次校准周期会把各 profile 的拉取分散在 6 小时窗口内（按 profile 数量定间隔），不会同时打上游接口。每次请求还会顺手被动采集额度：主机把上游的额度事件合并进 `usage.handle` 的响应头里，所以每个请求都自带它 profile 最新的窗口数字，零额外请求。活跃的 profile 光靠流量就能保持校准。
-
-独立于后台周期，每次选择时如果发现某个 profile 的长窗口（周/月）reset 时间已过，插件会在后台重新拉取该 profile 的精准额度（每个 profile 单 flight，不同 profile 之间至少间隔 10 分钟），而不是相信过期的快照。任何路径拉取失败，该 profile 冷却 5 小时后才允许各路径重试。5 小时窗口不单独重拉：靠本地用量反馈估算，估错了会变成一次失败请求，账本会把它转成 5 小时 block。
-
-## 原理
-
-插件实现 `scheduler.pick` 能力。主机每次提供候选 auth 列表（含 host priority tier 和状态）和入站请求头，插件返回选中的 auth id。负载根据插件自身在 `window_seconds` 内的近期选择来估计（自愈设计：没有跨请求的状态会泄漏，重启后从干净状态开始）。
+- **客户端身份**是入站 `Authorization`（或 `X-Api-Key`）头的 SHA-256 哈希，原始 Key 不会存储也不会打日志。
+- **永远不会弄坏请求。** 没有候选 profile、或插件被关闭时，它会放弃本次决策，主机回退到默认调度器。
+- **`strategy` 设置**为了兼容会被接受，但实际被忽略——永远按上面的排名规则选。
+- **启动新额度窗口的倒计时。** Codex 的窗口倒计时是从第一次消耗 token 才开始的。如果一次刷新发现长窗口的 reset 还在一个完整窗口之后（说明空闲、从没启动过），插件会发一条极小的 `hi` 消息把倒计时启动，否则这个 reset 时间永远不会变成真的。每个窗口只发一次，不是轮询。
+- **精确的排名规则。** Fresh 选择按以下顺序排名：(1) 你的 `quota_priorities`；(2) 被别的 Key 占用的 profile 排在没被占用的之后（只有全部被占用时才按占用数最少的选）；(3) 额度已知的排在未知之前；(4) 长窗口（周/月）reset 最早的优先——reset 时间差 1 小时内算同一时刻，没有已知 reset 的排最后；(5) 同一 tier 内 fill-first：精准 `used_percent` 高的优先，其次账本累计 token 多的，从没用过的最后；(6) 未知额度的按 host priority（数字大的优先）；(7) 近期负载最少的；(8) 这个 Key 上次用过的 profile（纯弱偏好）；(9) 自然 ID 排序，取第一个。
 
 ## 开发
 
 ```bash
-make test    # 均衡核心的单元测试
+make test    # 单元测试
 make vet     # go vet
-make build   # 为本机平台构建插件
-make dist    # 交叉编译全部 6 个平台产物
+make build   # 给本机编译
+make dist    # 交叉编译全部 6 个平台
 make zip VERSION=0.1.0  # 按商店格式打包 zip + checksums.txt
 ```
-
-端到端检查会把编译好的 `.so` 走一遍真实 C ABI（`plugin.register` → `scheduler.pick` → `plugin.reconfigure`），见开发时用的测试脚本。
 
 ## License
 
