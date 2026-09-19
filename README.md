@@ -41,7 +41,7 @@ Once published to the official store, install from the CLIProxyAPI management UI
          providers: ["codex"]      # optional: only balance these providers; empty = all
          strategy: least-connections # or: round-robin
          sticky: true
-         sticky_ttl_seconds: 14400  # 4h
+         sticky_ttl_seconds: 86400  # 24h (default)
          window_seconds: 120
          max_inflight_per_profile: 8
          quota_enabled: true        # quota-aware ordering via usage feedback (no polling)
@@ -59,7 +59,7 @@ Once published to the official store, install from the CLIProxyAPI management UI
 | `providers` | array | `[]` | Only balance across these provider keys (e.g. `codex`). Empty means every provider offered by the host. |
 | `strategy` | enum | `least-connections` | Accepted for compatibility (`least-connections` or `round-robin`) but ignored: the plugin always takes the top-ranked candidate from its quota-aware ordering. |
 | `sticky` | bool | `true` | Pin each client API key to one profile while it stays healthy (prompt-cache affinity). |
-| `sticky_ttl_seconds` | int | `14400` (4h) | How long an idle sticky assignment is kept. |
+| `sticky_ttl_seconds` | int | `86400` (24h) | How long an idle sticky assignment is kept. |
 | `window_seconds` | int | `120` | Sliding window used to estimate recent load per profile. |
 | `max_inflight_per_profile` | int | `8` | Recent-pick threshold above which a sticky assignment spills over to the least-loaded profile. |
 | `quota_enabled` | bool | `true` | Quota-aware ordering. Primary signal is the usage-feedback ledger (see below); precise upstream snapshots are only used for calibration. |

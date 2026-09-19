@@ -23,7 +23,7 @@ const (
 const (
 	DefaultStrategy              = StrategyLeastConnections
 	DefaultSticky                = true
-	DefaultStickyTTL             = 4 * time.Hour
+	DefaultStickyTTL             = 24 * time.Hour
 	DefaultWindow                = 120 * time.Second
 	DefaultMaxInflightPerProfile = 8
 	// DefaultQuotaCalibration is the default background precise-quota

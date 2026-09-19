@@ -222,11 +222,11 @@ func TestStrategyIgnored(t *testing.T) {
 	}
 }
 
-// Sticky TTL defaults to 4 hours.
-func TestStickyTTLDefaultFourHours(t *testing.T) {
+// Sticky TTL defaults to 24 hours.
+func TestStickyTTLDefault24Hours(t *testing.T) {
 	cfg := DefaultConfig()
-	if got := cfg.StickyTTL(); got != 4*time.Hour {
-		t.Fatalf("default sticky TTL = %v, want 4h", got)
+	if got := cfg.StickyTTL(); got != 24*time.Hour {
+		t.Fatalf("default sticky TTL = %v, want 24h", got)
 	}
 }
 
@@ -404,7 +404,7 @@ func TestHistoryPreferenceAfterStickyExpiry(t *testing.T) {
 	if got, _ := b.Pick("key-B", candidates, cfg); got != "codex-profile-1" {
 		t.Fatalf("B first pick = %q, want codex-profile-1", got)
 	}
-	clock.Advance(5 * time.Hour) // past the 4h sticky TTL
+	clock.Advance(25 * time.Hour) // past the 24h sticky TTL
 
 	// Without the preference both would fill-first to codex-profile-0.
 	if got, _ := b.Pick("key-B", candidates, cfg); got != "codex-profile-1" {
@@ -424,9 +424,9 @@ func TestHistoryDoesNotOverrideNoConflict(t *testing.T) {
 
 	b.Pick("key-A", candidates, cfg) // -> codex-profile-0
 	b.Pick("key-B", candidates, cfg) // -> codex-profile-1
-	clock.Advance(3 * time.Hour)
+	clock.Advance(20 * time.Hour)
 	b.Pick("key-A", candidates, cfg) // sticky refresh -> codex-profile-0
-	clock.Advance(time.Hour + time.Minute)
+	clock.Advance(4*time.Hour + time.Minute)
 	// B's sticky has expired; codex-profile-1 is free for C.
 	if got, _ := b.Pick("key-C", candidates, cfg); got != "codex-profile-1" {
 		t.Fatalf("C pick = %q, want codex-profile-1", got)

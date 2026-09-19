@@ -406,7 +406,7 @@ func pluginRegistration() registration {
 					Name:        "strategy",
 					Type:        pluginapi.ConfigFieldTypeEnum,
 					EnumValues:  []string{balancer.StrategyLeastConnections, balancer.StrategyRoundRobin},
-					Description: "Balancing policy: least-connections spreads load; round-robin cycles through profiles.",
+					Description: "Accepted for compatibility but ignored: the plugin always takes the top-ranked candidate from its quota-aware ordering.",
 				},
 				{
 					Name:        "sticky",
@@ -416,7 +416,7 @@ func pluginRegistration() registration {
 				{
 					Name:        "sticky_ttl_seconds",
 					Type:        pluginapi.ConfigFieldTypeInteger,
-					Description: "How long an idle sticky assignment is kept, in seconds.",
+					Description: "How long an idle sticky assignment is kept, in seconds. Defaults to 24h (86400). After expiry the client's most recently used profile is still preferred (soft preference).",
 				},
 				{
 					Name:        "window_seconds",
