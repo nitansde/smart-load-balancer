@@ -16,13 +16,18 @@
 {
   "id": "smart-load-balancer",
   "name": "Smart Load Balancer",
-  "description": "Spreads concurrent client requests across upstream auth profiles (e.g. Codex profiles) with per-key stickiness for prompt-cache reuse, instead of piling them onto the default scheduler pick.",
+  "description": "Routes each client API key to its own upstream profile and spends quota that resets soonest first — with per-key stickiness for warm prompt caches and automatic failover when a profile runs dry.",
   "author": "nitansde",
   "repository": "https://github.com/nitansde/smart-load-balancer",
   "homepage": "https://github.com/nitansde/smart-load-balancer",
   "license": "MIT",
   "logo": "https://raw.githubusercontent.com/nitansde/smart-load-balancer/main/assets/icon.png",
-  "tags": ["scheduler", "load-balancing", "codex", "routing"],
+  "tags": [
+    "scheduler",
+    "load-balancing",
+    "codex",
+    "routing"
+  ],
   "install": {
     "type": "github-release"
   }

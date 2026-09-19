@@ -2,7 +2,7 @@
 
 # Smart Load Balancer
 
-A [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) plugin that gives every client API key its own upstream profile — with quota-aware routing, instead of everyone piling onto the same one.
+A [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) plugin that routes every client API key to the right upstream profile: quota that resets soonest gets spent first, each key is pinned to its own profile for warm prompt caches, and dry profiles are skipped automatically.
 
 ## The problem, in 30 seconds
 

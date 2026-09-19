@@ -2,7 +2,7 @@
 
 # Smart Load Balancer
 
-一个 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 插件：让每个客户端 API Key 都有自己的上游 profile，额度感知地路由，而不是所有 Key 挤在同一个 profile 上。
+一个 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 插件：把每个客户端 API Key 路由到合适的上游 profile——快到期的额度先花，每个 Key 固定在自己的 profile 上让 prompt 缓存保持热度，额度用完的 profile 自动跳过。
 
 ## 30 秒讲清它解决什么问题
 
