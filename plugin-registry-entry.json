@@ -21,6 +21,7 @@
   "repository": "https://github.com/nitansde/smart-load-balancer",
   "homepage": "https://github.com/nitansde/smart-load-balancer",
   "license": "MIT",
+  "logo": "https://raw.githubusercontent.com/nitansde/smart-load-balancer/main/assets/icon.png",
   "tags": ["scheduler", "load-balancing", "codex", "routing"],
   "install": {
     "type": "github-release"
