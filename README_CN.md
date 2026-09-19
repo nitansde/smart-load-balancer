@@ -92,12 +92,13 @@ plugins:
 
 ## 配置
 
-管理界面只露出两个选项，其他都用内置默认值：
+管理界面露出三个选项，其他都用内置默认值：
 
 | 字段 | 默认值 | 说明 |
 |---|---|---|
 | `enabled` | `true` | 总开关。关闭 = 插件让位，主机用默认调度器。 |
 | `sticky_ttl_seconds` | `86400`（24h） | 空闲的 Key 在它的 profile 上固定多久。 |
+| `five_hour_boost` | `false` | 5h 加速模式。打开后，5h 额度 100% 且倒计时没在跑时，会借一条真实小请求消耗一点 token 来启动倒计时——和周额度一样的 cherry-pick 机制，插件本身不主动发任何请求。 |
 
 <details>
 <summary>高级参数（只有手改 config.yaml 才需要）</summary>

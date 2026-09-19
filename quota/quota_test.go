@@ -186,3 +186,34 @@ func TestParseUsageMonthly(t *testing.T) {
 		t.Fatalf("monthly reset = %v, want %v", parsed.Long.ResetAt, want)
 	}
 }
+
+func fiveHourWindow(used float64, resetAt time.Time) *Window {
+	u := used
+	return &Window{Kind: WindowFiveHour, UsedPercent: &u, ResetAt: resetAt}
+}
+
+func TestSnapshotFiveHourFresh(t *testing.T) {
+	now := time.Now()
+	cases := []struct {
+		name string
+		snap Snapshot
+		want bool
+	}{
+		{"nil window", Snapshot{}, false},
+		{"nil used percent", Snapshot{FiveHour: &Window{Kind: WindowFiveHour, ResetAt: now.Add(5 * time.Hour)}}, false},
+		{"partially used", Snapshot{FiveHour: fiveHourWindow(42.5, now.Add(3*time.Hour))}, false},
+		{"exhausted", Snapshot{FiveHour: fiveHourWindow(100, now.Add(time.Hour))}, false},
+		{"renewed reset passed", Snapshot{FiveHour: fiveHourWindow(80, now.Add(-time.Minute))}, true},
+		{"zero use rolling reset", Snapshot{FiveHour: fiveHourWindow(0, now.Add(5*time.Hour))}, true},
+		{"zero use within tolerance", Snapshot{FiveHour: fiveHourWindow(0, now.Add(5*time.Hour-4*time.Minute))}, true},
+		{"zero use countdown running", Snapshot{FiveHour: fiveHourWindow(0, now.Add(3*time.Hour))}, false},
+		{"zero use no reset info", Snapshot{FiveHour: fiveHourWindow(0, time.Time{})}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.snap.FiveHourFresh(now); got != tc.want {
+				t.Errorf("FiveHourFresh() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

@@ -60,6 +60,13 @@ type Config struct {
 	// preferred first. It applies inside quota-aware ordering; profiles
 	// not listed rank after all listed ones.
 	QuotaPriorities []string `yaml:"quota_priorities"`
+	// FiveHourBoost, when true, treats the 5-hour window like the weekly
+	// one: a profile whose 5h window sits at 100% with no countdown
+	// running is marked for calibration, so the next suitable real
+	// request is borrowed for one shot to spend a little token and kick
+	// off its 5h countdown. The plugin still never sends requests of its
+	// own. Defaults to false.
+	FiveHourBoost bool `yaml:"five_hour_boost"`
 }
 
 // WithDefaults returns the config with zero values replaced by defaults and

@@ -383,6 +383,11 @@ func pluginRegistration() registration {
 					Type:        pluginapi.ConfigFieldTypeInteger,
 					Description: "空闲的粘性绑定保留时长（秒），默认 24h（86400）。过期后该客户端上次用过的 profile 仍会被优先考虑（弱偏好）。How long an idle sticky assignment is kept, in seconds. Defaults to 24h (86400). After expiry, the last-used profile of the client is still preferred as a soft hint.",
 				},
+				{
+					Name:        "five_hour_boost",
+					Type:        pluginapi.ConfigFieldTypeBoolean,
+					Description: "5h 加速模式，默认关闭。打开后 5h 窗口按周额度的模式处理：看到 5h 额度 100%（倒计时没在跑）就借一条真实小请求消耗一点 token 来启动倒计时，插件本身不主动发任何请求。5h boost mode, default off. When on, the 5h window is treated like the weekly one: a 5h window at 100% with no countdown running borrows one small real request to kick off its countdown. The plugin never sends requests of its own.",
+				},
 			},
 		},
 		Capabilities: registrationCapabilities{
@@ -599,6 +604,15 @@ func (r *quotaResolver) Lookup(authID, provider string) balancer.QuotaInfo {
 		// one shot to refresh it; the five-hour window is tracked
 		// locally from usage feedback, not re-fetched.
 		if longWindowResetPassed(snap, now) {
+			divertState.Pending.Mark(authID)
+		}
+		// 5h boost mode (default off): treat the 5h window like the
+		// weekly one. A 5h window at 100% with no countdown running
+		// is marked, so the next suitable real request is borrowed
+		// for one shot to spend a little token and kick off its
+		// countdown — same cherry-pick as the weekly mode, still
+		// zero self-initiated requests.
+		if loadedConfig().FiveHourBoost && snap.FiveHourFresh(now) {
 			divertState.Pending.Mark(authID)
 		}
 		if snap.Exhausted() {

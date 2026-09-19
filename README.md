@@ -93,12 +93,13 @@ plugins:
 
 ## Configuration
 
-The management UI shows only two options; everything else keeps sane built-in defaults:
+The management UI shows three options; everything else keeps sane built-in defaults:
 
 | Field | Default | What it does |
 |---|---|---|
 | `enabled` | `true` | Master switch. Off = the plugin steps aside and the host's default scheduler takes over. |
 | `sticky_ttl_seconds` | `86400` (24h) | How long an idle key stays pinned to its profile. |
+| `five_hour_boost` | `false` | 5h boost mode. When on, a 5h window at 100% with no countdown running borrows one small real request to kick off its countdown — same cherry-pick as the weekly mode, the plugin never sends requests of its own. |
 
 <details>
 <summary>Advanced knobs (only if you hand-edit config.yaml)</summary>

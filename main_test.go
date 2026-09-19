@@ -60,17 +60,18 @@ func TestDisabledPluginDeclinesPick(t *testing.T) {
 	}
 }
 
-// The management UI only exposes the master switch and the sticky TTL.
+// The management UI exposes the master switch, the sticky TTL, and the
+// 5h boost mode toggle — nothing else.
 func TestConfigFieldsAreMinimal(t *testing.T) {
 	fields := pluginRegistration().Metadata.ConfigFields
-	if len(fields) != 2 {
+	if len(fields) != 3 {
 		names := make([]string, 0, len(fields))
 		for _, f := range fields {
 			names = append(names, f.Name)
 		}
-		t.Fatalf("expected 2 config fields, got %d: %v", len(fields), names)
+		t.Fatalf("expected 3 config fields, got %d: %v", len(fields), names)
 	}
-	if fields[0].Name != "enabled" || fields[1].Name != "sticky_ttl_seconds" {
-		t.Fatalf("unexpected config fields: %q, %q", fields[0].Name, fields[1].Name)
+	if fields[0].Name != "enabled" || fields[1].Name != "sticky_ttl_seconds" || fields[2].Name != "five_hour_boost" {
+		t.Fatalf("unexpected config fields: %q, %q, %q", fields[0].Name, fields[1].Name, fields[2].Name)
 	}
 }

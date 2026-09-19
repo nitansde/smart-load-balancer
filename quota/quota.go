@@ -93,6 +93,36 @@ func (s Snapshot) Fresh() bool {
 	return *s.Long.UsedPercent == 0
 }
 
+// kickTolerance is how close a window's reset may sit to the full window
+// length while still counting as "countdown never started". Codex rolls
+// the reset forward by the whole window while a profile is idle and locks
+// it in once tokens are consumed, so a reset ~one window out means idle.
+const kickTolerance = 5 * time.Minute
+
+// FiveHourFresh reports whether the five-hour window is at 100% with no
+// countdown running, i.e. a borrowed real request should kick off its
+// countdown the way the weekly mode does for cold profiles. True when the
+// window already renewed (reset passed, effectively 100% again), or when
+// it shows 0% use with a reset still about a full window out (rolling,
+// never started). A 0% with a reset locked in clearly sooner means the
+// countdown is running and the 0% is just rounding of tiny use.
+func (s Snapshot) FiveHourFresh(now time.Time) bool {
+	w := s.FiveHour
+	if w == nil {
+		return false
+	}
+	if !w.ResetAt.IsZero() && !w.ResetAt.After(now) {
+		return true
+	}
+	if w.UsedPercent == nil || *w.UsedPercent != 0 {
+		return false
+	}
+	if w.ResetAt.IsZero() {
+		return true
+	}
+	return !w.ResetAt.Before(now.Add(w.windowPeriod() - kickTolerance))
+}
+
 // LongUsedPercent returns the long window's used percent, or -1 when unknown.
 // Higher means less remaining; it is the fill-first ordering key.
 func (s Snapshot) LongUsedPercent() float64 {
