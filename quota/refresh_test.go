@@ -383,9 +383,9 @@ func TestRefresherKickWhenLedgerClean(t *testing.T) {
 }
 
 func TestRefresherNoKickWhenCountdownRunning(t *testing.T) {
-	// 100% but the countdown is already running (future reset_at, built
-	// dynamically so the test doesn't rot).
-	futureReset := time.Now().Add(7 * 24 * time.Hour).UTC().Format(time.RFC3339)
+	// Interval well short of the full window: the countdown is locked in
+	// and shrinking. Built dynamically so the test doesn't rot.
+	futureReset := time.Now().Add(6 * 24 * time.Hour).UTC().Format(time.RFC3339)
 	usage := []byte(fmt.Sprintf(`{"plan_type":"pro","rate_limit":{` +
 		`"secondary_window":{"used_percent":0,"limit_window_seconds":604800,"reset_at":%q}}}`,
 		futureReset))
@@ -408,24 +408,62 @@ func TestRefresherNoKickWhenCountdownRunning(t *testing.T) {
 	}
 }
 
+func TestRefresherKickWhenRollingReset(t *testing.T) {
+	// reset_at ~one full window out: idle windows keep it rolling forward
+	// on every fetch, so the countdown hasn't started — kick it.
+	futureReset := time.Now().Add(7*24*time.Hour - time.Minute).UTC().Format(time.RFC3339)
+	usage := []byte(fmt.Sprintf(`{"plan_type":"pro","rate_limit":{` +
+		`"secondary_window":{"used_percent":0,"limit_window_seconds":604800,"reset_at":%q}}}`,
+		futureReset))
+	client := &fakeHostClient{
+		auths:    []AuthEntry{{ID: "auth-1", AuthIndex: "0", Provider: "codex"}},
+		authJSON: map[string]json.RawMessage{"0": json.RawMessage(`{"access_token":"tok-a"}`)},
+		usage:    map[string][]byte{"tok-a": usage},
+	}
+	store := NewStore()
+	cfg := testConfig()
+	cfg.ProbeFresh = true
+	r := NewRefresher(client, store, NewLedger(), func() Config { return cfg })
+	r.spread = time.Millisecond
+	r.RefreshOnce()
+
+	probes := 0
+	for _, req := range client.requests {
+		if req.URL == codexProbeEndpoint {
+			probes++
+		}
+	}
+	if probes != 1 {
+		t.Errorf("kick sent %d times, want exactly 1 for a rolling (not started) window", probes)
+	}
+}
+
 func TestShouldKick_StaleSnapshot(t *testing.T) {
 	zero := 0.0
 	now := time.Now()
-	r := NewRefresher(nil, NewStore(), NewLedger(), testConfig)
+	full := 7 * 24 * time.Hour
 
-	// Usage observed after the fetch: the snapshot is stale, that usage
-	// already started a countdown.
+	// Rolling reset_at (full interval) but usage observed after the fetch:
+	// the snapshot is stale, that usage already started a countdown.
+	r := NewRefresher(nil, NewStore(), NewLedger(), testConfig)
 	r.ledger.Observe(UsageObservation{AuthID: "auth-1", ObservedAt: now.Add(time.Hour)})
 	snap := Snapshot{AuthID: "auth-1", FetchedAt: now,
-		Long: &Window{UsedPercent: &zero}}
+		Long: &Window{UsedPercent: &zero, ResetAt: now.Add(full)}}
 	if r.shouldKick("auth-1", snap) {
 		t.Error("shouldKick = true with usage newer than the snapshot")
 	}
 
-	// Usage older than the fetch: snapshot is current, kick is due.
+	// Rolling reset_at, usage before the fetch: snapshot is current, kick.
 	r2 := NewRefresher(nil, NewStore(), NewLedger(), testConfig)
 	r2.ledger.Observe(UsageObservation{AuthID: "auth-1", ObservedAt: now.Add(-time.Hour)})
 	if !r2.shouldKick("auth-1", snap) {
-		t.Error("shouldKick = false with no usage since the fetch")
+		t.Error("shouldKick = false for a rolling window with no usage since the fetch")
+	}
+
+	// Shrinking interval: countdown already running, no kick.
+	running := Snapshot{AuthID: "auth-1", FetchedAt: now,
+		Long: &Window{UsedPercent: &zero, ResetAt: now.Add(full - 2*time.Hour)}}
+	if r2.shouldKick("auth-1", running) {
+		t.Error("shouldKick = true while the countdown interval is shrinking")
 	}
 }

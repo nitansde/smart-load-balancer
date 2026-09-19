@@ -79,10 +79,11 @@ type Config struct {
 	// 72h.
 	QuotaRefreshSeconds int `yaml:"quota_refresh_seconds"`
 	// QuotaProbeFresh sends one minimal "hi" request after a refresh shows
-	// a long window at ~100% with no countdown running. For Codex each
-	// window's countdown starts on first token use, so the "hi" starts the
-	// new window's countdown, making its reset time known for
-	// reset-soonest ordering. Defaults to true.
+	// the long window's reset interval at about the full window length
+	// (~7d / 30d): Codex keeps reset_at rolling one full window out while
+	// idle, and only token use locks the countdown in. The "hi" starts the
+	// new window's countdown so its reset time is real for reset-soonest
+	// ordering. Defaults to true.
 	QuotaProbeFresh bool `yaml:"quota_probe_fresh"`
 	// QuotaPriorities is an ordered list of auth profile IDs, most
 	// preferred first. It applies inside quota-aware ordering; profiles

@@ -78,10 +78,11 @@ type Config struct {
 	Enabled   bool
 	Providers []string
 	Interval  time.Duration
-	// ProbeFresh sends one minimal "hi" request when a refresh shows a
-	// long window at ~100% with no countdown running. For Codex each
-	// window's countdown starts on first token use, so the "hi" starts the
-	// new window's countdown and makes its reset time known.
+	// ProbeFresh sends one minimal "hi" request when a refresh shows the
+	// long window's reset interval at about the full window length (~7d /
+	// 30d). Codex keeps reset_at rolling one full window out while idle;
+	// only token use locks it in. The "hi" starts the new window's
+	// countdown, making its reset time real for reset-soonest ordering.
 	ProbeFresh bool
 	// MaxStale caps how old a snapshot may get before it is re-fetched even
 	// when nothing else changed. Zero means defaultMaxStale.
@@ -386,12 +387,13 @@ func (r *Refresher) refreshOne(auth AuthEntry, cfg Config) {
 	r.clearFailure(auth.ID)
 	r.store.Set(snap)
 
-	// Kick off the long window's countdown when it isn't running: for
-	// Codex each window's countdown starts on first token use, so a
-	// refresh showing ~100% with no future reset_at means the new window
-	// hasn't started. One minimal "hi" starts it, making the reset time
-	// known for reset-soonest ordering. This is per window, not once
-	// ever: every reset window needs its own kick.
+	// Kick off the long window's countdown when it isn't running. Codex
+	// keeps reset_at about one full window in the future while the window
+	// is idle (it rolls forward on every fetch); only token use locks it
+	// in, after which the interval shrinks. So a refresh showing an
+	// interval of ~7d/30d means the new window hasn't started: one minimal
+	// "hi" starts it, making the reset time real for reset-soonest
+	// ordering. This is per window, not once ever.
 	if cfg.ProbeFresh && r.shouldKick(auth.ID, snap) {
 		if creds, err := CredentialsForAuth(r.client, auth); err == nil {
 			ProbeFreshWindow(r.client.DoHTTP, creds)
@@ -402,23 +404,34 @@ func (r *Refresher) refreshOne(auth AuthEntry, cfg Config) {
 	}
 }
 
-// shouldKick reports whether the profile's long-window countdown needs
-// starting. Upstream used_percent rounds tiny usage to 0%, so "100%"
-// alone can't tell "never used" from "just reset" — but the kick is due
-// in both cases: any window without a running countdown gets one. A
-// future reset_at means the countdown is already running. Ledger usage
-// newer than the snapshot means the snapshot is stale (that usage
-// already started a countdown), so don't kick on stale data.
+// kickTolerance bounds how far the reset interval may fall short of the
+// full window length while still counting as "countdown not started".
+// An idle window's reset_at rolls forward on every fetch, so the measured
+// interval jitters by fetch latency; an hour is generous without
+// misjudging a countdown that has been running for a while.
+const kickTolerance = time.Hour
+
+// shouldKick reports whether the long window's countdown needs starting.
+// Codex keeps reset_at about one full window in the future while the
+// window is idle — it keeps rolling forward on every fetch. Only token
+// use locks it in, after which the interval (reset_at - now) shrinks. So
+// the countdown is "not running" exactly when the interval is about the
+// full window length; used_percent can't tell, since tiny usage rounds to
+// 0%.
 func (r *Refresher) shouldKick(authID string, snap Snapshot) bool {
-	if !snap.Fresh() {
+	w := snap.Long
+	if w == nil {
 		return false
 	}
-	if snap.Long != nil && snap.Long.ResetAt.After(time.Now()) {
-		return false
+	if w.ResetAt.IsZero() {
+		return true // no countdown info at all; kick to start one
+	}
+	if w.ResetAt.Sub(time.Now()) < w.windowPeriod()-kickTolerance {
+		return false // interval is shrinking: countdown already running
 	}
 	if r.ledger != nil {
 		if e, ok := r.ledger.Get(authID); ok && e.LastObserved.After(snap.FetchedAt) {
-			return false
+			return false // stale snapshot: that usage started a countdown
 		}
 	}
 	return true
