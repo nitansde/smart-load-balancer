@@ -677,8 +677,10 @@ func longWindowResetPassed(snap quota.Snapshot, now time.Time) bool {
 	return w != nil && !w.ResetAt.IsZero() && !w.ResetAt.After(now)
 }
 
-// refreshQuotaNow asks the quota refresher for an immediate, single-flighted
-// re-fetch of authID's quota snapshot. Safe to call from the pick path.
+// refreshQuotaNow asks the quota refresher to re-fetch authID's quota
+// snapshot. The fetch is single-flighted per auth and spaced at least ten
+// minutes from other on-demand fetches; a failed fetch cools the auth down
+// for five hours. Safe to call from the pick path.
 func refreshQuotaNow(authID string) {
 	quotaRefresherMu.Lock()
 	r := quotaRefresher

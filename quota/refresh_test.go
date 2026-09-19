@@ -13,6 +13,10 @@ type stubHostClient struct {
 	auths       []AuthEntry
 	doHTTPCalls int
 	usageBody   []byte
+	// httpErr, when set, makes DoHTTP fail (fetch-failure paths).
+	httpErr error
+	// fetchTimes records when each DoHTTP call started.
+	fetchTimes []time.Time
 }
 
 func (s *stubHostClient) ListAuths() ([]AuthEntry, error) { return s.auths, nil }
@@ -24,7 +28,12 @@ func (s *stubHostClient) GetAuthJSON(authIndex string) (json.RawMessage, error) 
 func (s *stubHostClient) DoHTTP(req HTTPRequest) (HTTPResponse, error) {
 	s.mu.Lock()
 	s.doHTTPCalls++
+	s.fetchTimes = append(s.fetchTimes, time.Now())
+	err := s.httpErr
 	s.mu.Unlock()
+	if err != nil {
+		return HTTPResponse{}, err
+	}
 	return HTTPResponse{StatusCode: 200, Body: s.usageBody}, nil
 }
 
@@ -32,6 +41,12 @@ func (s *stubHostClient) calls() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.doHTTPCalls
+}
+
+func (s *stubHostClient) times() []time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]time.Time(nil), s.fetchTimes...)
 }
 
 func usageBodyWithReset(t *testing.T, reset time.Time) []byte {
@@ -107,8 +122,8 @@ func TestRefreshAuthNow_SingleFlight(t *testing.T) {
 		_, ok := store.Get("a")
 		return ok
 	}, "expected snapshot after RefreshAuthNow")
-	// Cooldown may allow a second attempt only after 5 minutes; within the
-	// test window there must be exactly one fetch.
+	// Cooldown may allow a second attempt only after the on-demand gap; within
+	// the test window there must be exactly one fetch.
 	time.Sleep(100 * time.Millisecond)
 	if n := client.calls(); n != 1 {
 		t.Fatalf("expected single-flighted fetch, got %d calls", n)
@@ -177,5 +192,133 @@ func TestNeedsRefresh_FiveHourResetAloneDoesNotTrigger(t *testing.T) {
 	store.Set(snap)
 	if !r.needsRefresh(auth, Config{Enabled: true}, now) {
 		t.Fatal("a passed weekly reset must trigger a re-fetch")
+	}
+}
+
+// A failed quota fetch cools the auth down for five hours: an immediate
+// retry from any path must be suppressed.
+func TestRefresh_FailureCooldown(t *testing.T) {
+	client := &stubHostClient{
+		auths:   []AuthEntry{{ID: "a", AuthIndex: "0", Provider: "codex"}},
+		httpErr: fmt.Errorf("boom"),
+	}
+	store := NewStore()
+	r := NewRefresher(client, store, func() Config { return Config{Enabled: true} })
+	r.spread = time.Millisecond
+
+	r.RefreshOnce()
+	if n := client.calls(); n != 1 {
+		t.Fatalf("expected 1 failed attempt, got %d", n)
+	}
+	if _, ok := store.Get("a"); ok {
+		t.Fatal("failed fetch must not store a snapshot")
+	}
+
+	// Immediate retry from the periodic path must be skipped.
+	r.RefreshOnce()
+	if n := client.calls(); n != 1 {
+		t.Fatalf("failed auth must cool down 5h, got %d calls", n)
+	}
+
+	// And from the on-demand path too.
+	r.fetchGap = time.Millisecond
+	r.RefreshAuthNow("a")
+	time.Sleep(200 * time.Millisecond)
+	if n := client.calls(); n != 1 {
+		t.Fatalf("on-demand retry of failed auth must cool down 5h, got %d calls", n)
+	}
+}
+
+// On-demand (reset-expiry) fetches for different profiles must be spaced at
+// least fetchGap apart instead of bursting together.
+func TestRefreshAuthNow_SpacedApart(t *testing.T) {
+	now := time.Now()
+	client := &stubHostClient{
+		auths: []AuthEntry{
+			{ID: "a", AuthIndex: "0", Provider: "codex"},
+			{ID: "b", AuthIndex: "1", Provider: "codex"},
+		},
+		usageBody: usageBodyWithReset(t, now.Add(5*time.Hour)),
+	}
+	store := NewStore()
+	r := NewRefresher(client, store, func() Config { return Config{Enabled: true} })
+	r.fetchGap = 200 * time.Millisecond
+
+	r.RefreshAuthNow("a")
+	r.RefreshAuthNow("b")
+
+	waitFor(t, 5*time.Second, func() bool { return len(client.times()) == 2 },
+		"expected both on-demand fetches to run")
+	gap := client.times()[1].Sub(client.times()[0])
+	if gap < 100*time.Millisecond {
+		t.Fatalf("on-demand fetches must be spaced apart, gap = %v", gap)
+	}
+}
+
+// One calibration cycle staggers its fetches across the spread window:
+// with N profiles due, fetches start spread/N apart, the first immediately.
+func TestRefreshOnce_SpreadsFetches(t *testing.T) {
+	now := time.Now()
+	client := &stubHostClient{
+		auths: []AuthEntry{
+			{ID: "a", AuthIndex: "0", Provider: "codex"},
+			{ID: "b", AuthIndex: "1", Provider: "codex"},
+			{ID: "c", AuthIndex: "2", Provider: "codex"},
+		},
+		usageBody: usageBodyWithReset(t, now.Add(5*time.Hour)),
+	}
+	store := NewStore()
+	r := NewRefresher(client, store, func() Config { return Config{Enabled: true} })
+	r.spread = 300 * time.Millisecond
+
+	start := time.Now()
+	r.RefreshOnce()
+	times := client.times()
+	if len(times) != 3 {
+		t.Fatalf("expected 3 staggered fetches, got %d", len(times))
+	}
+	if times[0].Sub(start) > 100*time.Millisecond {
+		t.Fatalf("first fetch should start immediately, waited %v", times[0].Sub(start))
+	}
+	for i := 1; i < len(times); i++ {
+		if d := times[i].Sub(times[i-1]); d < 50*time.Millisecond {
+			t.Fatalf("fetch %d started only %v after the previous one", i, d)
+		}
+	}
+}
+
+// The periodic cycle leaves alone a profile with a recently scheduled
+// on-demand fetch instead of duplicating it.
+func TestRefreshOnce_SkipsPendingOnDemand(t *testing.T) {
+	now := time.Now()
+	client := &stubHostClient{
+		auths: []AuthEntry{
+			{ID: "a", AuthIndex: "0", Provider: "codex"},
+			{ID: "b", AuthIndex: "1", Provider: "codex"},
+		},
+		usageBody: usageBodyWithReset(t, now.Add(5*time.Hour)),
+	}
+	store := NewStore()
+	r := NewRefresher(client, store, func() Config { return Config{Enabled: true} })
+	r.spread = time.Millisecond
+	r.fetchGap = time.Hour
+	r.mu.Lock()
+	if r.onDemand == nil {
+		r.onDemand = make(map[string]time.Time)
+	}
+	r.onDemand["a"] = time.Now() // scheduled moments ago, not yet run
+	r.mu.Unlock()
+
+	r.RefreshOnce()
+
+	times := client.times()
+	if len(times) != 1 {
+		t.Fatalf("expected only b to be fetched, got %d fetches", len(times))
+	}
+	if _, ok := store.Get("b"); !ok {
+		t.Fatal("expected b's snapshot to be fetched")
+	}
+	if _, ok := store.Get("a"); ok {
+		t.Fatal("a has a pending on-demand fetch and must be left alone")
 	}
 }

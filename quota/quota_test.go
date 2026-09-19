@@ -188,6 +188,7 @@ func TestRefresherPopulatesStore(t *testing.T) {
 	}
 	store := NewStore()
 	r := NewRefresher(client, store, testConfig)
+	r.spread = time.Millisecond
 	r.RefreshOnce()
 
 	snap, ok := store.Get("auth-1")
@@ -229,6 +230,7 @@ func TestRefresherProbeFresh(t *testing.T) {
 	cfg := testConfig()
 	cfg.ProbeFresh = true
 	r := NewRefresher(client, store, func() Config { return cfg })
+	r.spread = time.Millisecond
 	r.RefreshOnce()
 	r.RefreshOnce() // second cycle must not probe again
 

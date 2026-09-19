@@ -18,11 +18,23 @@ const (
 	codexProbePayload  = `{"model":"gpt-5.4-mini","instructions":"","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"ping"}]}]}`
 	codexUserAgent     = "codex_cli_rs/0.76.0"
 
-	maxRefreshConcurrency = 2
-
 	// defaultMaxStale is the backstop refresh age: even a profile nobody
 	// used gets re-checked this often, catching quota consumed outside CPA.
 	defaultMaxStale = 6 * time.Hour
+
+	// defaultSpreadWindow is the window over which one background
+	// calibration cycle spreads its per-auth fetches. With N profiles due,
+	// fetches start spread/N apart, so the upstream endpoint is never hit
+	// by all profiles at once.
+	defaultSpreadWindow = 6 * time.Hour
+	// onDemandMinInterval is the minimum spacing between on-demand
+	// (reset-expiry) quota fetches. When many profiles' windows expire
+	// together, their re-fetches queue up this far apart instead of
+	// bursting the upstream endpoint.
+	onDemandMinInterval = 10 * time.Minute
+	// failedCooldown is how long a profile whose quota fetch failed is
+	// left alone before any path tries it again.
+	failedCooldown = 5 * time.Hour
 )
 
 // usageEndpoints maps a provider to its quota endpoint. Providers without an
@@ -86,20 +98,29 @@ type Refresher struct {
 	wg       sync.WaitGroup
 	probed   map[string]bool
 	onDemand map[string]time.Time
+	// nextOnDemand is the earliest time an on-demand fetch may start; it
+	// enforces the minimum spacing between on-demand fetches across
+	// profiles.
+	nextOnDemand time.Time
+	// failedAt records the last fetch failure per auth. A failed auth is
+	// not re-fetched until failedCooldown has passed.
+	failedAt map[string]time.Time
+	// spread staggers one calibration cycle's fetches; fetchGap spaces
+	// on-demand fetches. Tests override the const defaults.
+	spread   time.Duration
+	fetchGap time.Duration
 }
-
-// onDemandCooldown caps how often a stale snapshot is re-fetched on demand:
-// concurrent picks share one attempt, and a failed attempt waits before the
-// next try.
-const onDemandCooldown = 5 * time.Minute
 
 // NewRefresher returns a Refresher that is not yet running.
 func NewRefresher(client HostClient, store *Store, config func() Config) *Refresher {
 	return &Refresher{
-		client: client,
-		store:  store,
-		config: config,
-		probed: make(map[string]bool),
+		client:   client,
+		store:    store,
+		config:   config,
+		probed:   make(map[string]bool),
+		failedAt: make(map[string]time.Time),
+		spread:   defaultSpreadWindow,
+		fetchGap: onDemandMinInterval,
 	}
 }
 
@@ -155,7 +176,11 @@ func (r *Refresher) loop() {
 	}
 }
 
-// RefreshOnce pulls a fresh quota snapshot for every eligible auth.
+// RefreshOnce pulls a fresh quota snapshot for every eligible auth whose
+// quota could have changed. Fetches are staggered: with N profiles due,
+// they start spread/N apart inside the spread window, so one calibration
+// cycle never bursts the upstream endpoint. Profiles whose last fetch
+// failed, or with a recently scheduled on-demand fetch, are skipped.
 func (r *Refresher) RefreshOnce() {
 	cfg := r.config()
 	if !cfg.Enabled {
@@ -167,21 +192,14 @@ func (r *Refresher) RefreshOnce() {
 	}
 	eligible := filterAuths(auths, cfg.Providers)
 	now := time.Now()
-	sem := make(chan struct{}, maxRefreshConcurrency)
-	var wg sync.WaitGroup
+	var due []AuthEntry
 	for _, auth := range eligible {
-		if !r.needsRefresh(auth, cfg, now) {
-			continue
+		if r.needsRefresh(auth, cfg, now) &&
+			!r.inFailureCooldown(auth.ID, now) &&
+			!r.onDemandPending(auth.ID, now) {
+			due = append(due, auth)
 		}
-		wg.Add(1)
-		go func(a AuthEntry) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			r.refreshOne(a, cfg)
-		}(auth)
 	}
-	wg.Wait()
 	// Drop snapshots for auths that no longer exist.
 	seen := make(map[string]bool, len(eligible))
 	for _, a := range eligible {
@@ -192,14 +210,35 @@ func (r *Refresher) RefreshOnce() {
 			r.store.Remove(id)
 		}
 	}
+	var gap time.Duration
+	if n := len(due); n > 0 {
+		gap = r.spreadOrDefault() / time.Duration(n)
+	}
+	for i, auth := range due {
+		if i > 0 {
+			select {
+			case <-r.stop:
+				return
+			case <-time.After(gap):
+			}
+		}
+		if r.inFailureCooldown(auth.ID, time.Now()) {
+			continue
+		}
+		r.refreshOne(auth, cfg)
+	}
 }
 
 // RefreshAuthNow re-fetches one auth's quota snapshot in the background.
 // It is meant for snapshots whose window reset time has passed: the stored
 // numbers are stale, and the next pick should see fresh ones instead of
-// waiting for the next background cycle. Calls are single-flighted per auth
-// with a cooldown, so a burst of picks triggers at most one fetch. Works
-// even when background calibration is disabled (on-demand only).
+// waiting for the next background cycle.
+//
+// On-demand fetches never burst: every fetch starts at least fetchGap
+// after the previous on-demand fetch, no matter how many profiles expired
+// at once, and each auth is single-flighted within the gap. A failed fetch
+// cools the auth down for failedCooldown before any path retries it.
+// Works even when background calibration is disabled (on-demand only).
 func (r *Refresher) RefreshAuthNow(authID string) {
 	if r == nil || authID == "" {
 		return
@@ -208,19 +247,34 @@ func (r *Refresher) RefreshAuthNow(authID string) {
 	if !cfg.Enabled {
 		return
 	}
+	gap := r.gapOrDefault()
 	now := time.Now()
 	r.mu.Lock()
 	if r.onDemand == nil {
 		r.onDemand = make(map[string]time.Time)
 	}
-	if last, ok := r.onDemand[authID]; ok && now.Sub(last) < onDemandCooldown {
+	if last, ok := r.onDemand[authID]; ok && now.Sub(last) < gap {
 		r.mu.Unlock()
 		return
 	}
-	r.onDemand[authID] = now
+	at := now
+	if r.nextOnDemand.After(at) {
+		at = r.nextOnDemand
+	}
+	r.nextOnDemand = at.Add(gap)
+	r.onDemand[authID] = at
 	r.mu.Unlock()
 
+	delay := at.Sub(now)
 	go func() {
+		select {
+		case <-r.stop:
+			return
+		case <-time.After(delay):
+		}
+		if r.inFailureCooldown(authID, time.Now()) {
+			return
+		}
 		auths, err := r.client.ListAuths()
 		if err != nil {
 			return
@@ -234,6 +288,57 @@ func (r *Refresher) RefreshAuthNow(authID string) {
 		// Auth vanished: drop its snapshot.
 		r.store.Remove(authID)
 	}()
+}
+
+// spreadOrDefault returns the configured stagger window, defaulting to
+// defaultSpreadWindow.
+func (r *Refresher) spreadOrDefault() time.Duration {
+	if r.spread > 0 {
+		return r.spread
+	}
+	return defaultSpreadWindow
+}
+
+// gapOrDefault returns the configured on-demand spacing, defaulting to
+// onDemandMinInterval.
+func (r *Refresher) gapOrDefault() time.Duration {
+	if r.fetchGap > 0 {
+		return r.fetchGap
+	}
+	return onDemandMinInterval
+}
+
+// inFailureCooldown reports whether authID's last fetch failed recently
+// enough that no path should retry it yet.
+func (r *Refresher) inFailureCooldown(authID string, now time.Time) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	last, ok := r.failedAt[authID]
+	return ok && now.Sub(last) < failedCooldown
+}
+
+// onDemandPending reports whether an on-demand fetch was scheduled for
+// authID recently enough that the periodic cycle should leave it alone.
+func (r *Refresher) onDemandPending(authID string, now time.Time) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	last, ok := r.onDemand[authID]
+	return ok && now.Sub(last) < r.gapOrDefault()
+}
+
+func (r *Refresher) noteFailure(authID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.failedAt == nil {
+		r.failedAt = make(map[string]time.Time)
+	}
+	r.failedAt[authID] = time.Now()
+}
+
+func (r *Refresher) clearFailure(authID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.failedAt, authID)
 }
 
 // needsRefresh reports whether auth's quota could have changed since its
@@ -267,8 +372,12 @@ func (r *Refresher) needsRefresh(auth AuthEntry, cfg Config, now time.Time) bool
 func (r *Refresher) refreshOne(auth AuthEntry, cfg Config) {
 	snap, err := FetchSnapshot(r.client, auth)
 	if err != nil {
+		// A failed fetch cools the auth down for five hours before any
+		// path retries it, instead of hammering a broken endpoint.
+		r.noteFailure(auth.ID)
 		return
 	}
+	r.clearFailure(auth.ID)
 	r.store.Set(snap)
 
 	if cfg.ProbeFresh && snap.Fresh() {
