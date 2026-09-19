@@ -83,7 +83,8 @@ type Config struct {
 	// (~7d / 30d): Codex keeps reset_at rolling one full window out while
 	// idle, and only token use locks the countdown in. The "hi" starts the
 	// new window's countdown so its reset time is real for reset-soonest
-	// ordering. Defaults to true.
+	// ordering. Defaults to false: the probe issues a request the real
+	// client never sends, so it stays opt-in.
 	QuotaProbeFresh bool `yaml:"quota_probe_fresh"`
 	// QuotaPriorities is an ordered list of auth profile IDs, most
 	// preferred first. It applies inside quota-aware ordering; profiles
@@ -176,7 +177,7 @@ func DefaultConfig() Config {
 		MaxInflightPerProfile: DefaultMaxInflightPerProfile,
 		QuotaEnabled:          true,
 		QuotaRefreshSeconds:   int(DefaultQuotaCalibration / time.Second),
-		QuotaProbeFresh:       true,
+		QuotaProbeFresh:       false,
 	}.WithDefaults()
 }
 
