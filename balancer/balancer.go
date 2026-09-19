@@ -62,23 +62,39 @@ type stickyEntry struct {
 	lastUsed time.Time
 }
 
+// historyEntry remembers a client key's most recently used profile,
+// backing the last-used preference after the sticky TTL expires.
+type historyEntry struct {
+	authID string
+	at     time.Time
+}
+
+// historyTTL bounds how long a client's last-used profile is remembered
+// for the preference ranking. maxHistoryEntries caps the map; beyond it
+// the oldest entries are evicted.
+const (
+	historyTTL       = 7 * 24 * time.Hour
+	maxHistoryEntries = 65536
+)
+
 // Balancer spreads picks across candidates. It is safe for concurrent use;
 // the host may invoke scheduler.pick from many goroutines at once.
 type Balancer struct {
-	mu     sync.Mutex
-	now    func() time.Time
-	picks  []pickRecord
-	sticky map[string]stickyEntry
+	mu      sync.Mutex
+	now     func() time.Time
+	picks   []pickRecord
+	sticky  map[string]stickyEntry
+	history map[string]historyEntry
 }
 
 // New returns a Balancer using the real clock.
 func New() *Balancer {
-	return &Balancer{now: time.Now, sticky: make(map[string]stickyEntry)}
+	return &Balancer{now: time.Now, sticky: make(map[string]stickyEntry), history: make(map[string]historyEntry)}
 }
 
 // newWithClock is used by tests to control time.
 func newWithClock(now func() time.Time) *Balancer {
-	return &Balancer{now: now, sticky: make(map[string]stickyEntry)}
+	return &Balancer{now: now, sticky: make(map[string]stickyEntry), history: make(map[string]historyEntry)}
 }
 
 // ClientKeyHash derives a stable, non-reversible identity for the calling
@@ -200,7 +216,7 @@ func (b *Balancer) PickWithQuota(keyHash string, candidates []Candidate, cfg Con
 		}
 	}
 
-	rs := newRankState(eligible, cfg, resolver, loads, owners)
+	rs := newRankState(eligible, cfg, resolver, keyHash, loads, owners, b.history)
 	ranked := rs.sorted(eligible)
 	// Fill-first on ties: take the head of the ranking. The strategy
 	// setting stays ignored.
@@ -222,21 +238,23 @@ func userRank(priorities []string, authID string) int {
 
 // rankState bundles the inputs to candidate ranking.
 type rankState struct {
-	cfg    Config
-	infos  map[string]QuotaInfo
-	loads  map[string]int
-	owners map[string]int
-	now    time.Time
+	cfg     Config
+	infos   map[string]QuotaInfo
+	loads   map[string]int
+	owners  map[string]int
+	keyHash string
+	history map[string]historyEntry
+	now     time.Time
 }
 
-func newRankState(candidates []Candidate, cfg Config, resolver QuotaResolver, loads, owners map[string]int) *rankState {
+func newRankState(candidates []Candidate, cfg Config, resolver QuotaResolver, keyHash string, loads, owners map[string]int, history map[string]historyEntry) *rankState {
 	infos := make(map[string]QuotaInfo, len(candidates))
 	if resolver != nil {
 		for _, c := range candidates {
 			infos[c.ID] = resolver.Lookup(c.ID, c.Provider)
 		}
 	}
-	return &rankState{cfg: cfg, infos: infos, loads: loads, owners: owners, now: time.Now()}
+	return &rankState{cfg: cfg, infos: infos, loads: loads, owners: owners, keyHash: keyHash, history: history, now: time.Now()}
 }
 
 // compare orders two candidates for fresh selection and returns 0 when
@@ -319,6 +337,15 @@ func (s *rankState) compare(a, b Candidate) int {
 		}
 		return 1
 	}
+	// Prefer the client's most recently used profile. Soft preference
+	// only: it never overrides the no-conflict guarantee, quota
+	// ordering, or load above.
+	if ha, hb := s.history[s.keyHash].authID == a.ID, s.history[s.keyHash].authID == b.ID; ha != hb {
+		if ha {
+			return -1
+		}
+		return 1
+	}
 	// Final key: candidate ID in natural order (numeric runs compared by
 	// value, so "profile-2" sorts before "profile-10"), mirroring CPA's
 	// default scheduler which orders each priority tier by auth ID.
@@ -393,6 +420,7 @@ func (b *Balancer) Reset() {
 	defer b.mu.Unlock()
 	b.picks = nil
 	b.sticky = make(map[string]stickyEntry)
+	b.history = make(map[string]historyEntry)
 }
 
 // LoadSnapshot reports the current per-profile pick counts inside the window.
@@ -417,6 +445,12 @@ func (b *Balancer) record(authID, keyHash string, cfg Config) {
 
 func (b *Balancer) recordLocked(authID, keyHash string, now time.Time, cfg Config) {
 	b.picks = append(b.picks, pickRecord{authID: authID, at: now})
+	if keyHash != "" {
+		b.history[keyHash] = historyEntry{authID: authID, at: now}
+		if len(b.history) > maxHistoryEntries {
+			b.evictOldHistoryLocked()
+		}
+	}
 	if overflow := len(b.picks) - MaxPickHistory; overflow > 0 {
 		b.picks = append([]pickRecord(nil), b.picks[overflow:]...)
 	}
@@ -451,6 +485,30 @@ func (b *Balancer) pruneLocked(now time.Time, cfg Config) {
 		if now.Sub(entry.lastUsed) > cfg.StickyTTL() {
 			delete(b.sticky, key)
 		}
+	}
+	// Forget last-used profiles remembered too long ago.
+	for key, entry := range b.history {
+		if now.Sub(entry.at) > historyTTL {
+			delete(b.history, key)
+		}
+	}
+}
+
+// evictOldHistoryLocked drops the oldest ~10% of history entries when the
+// map exceeds maxHistoryEntries. Callers must hold b.mu.
+func (b *Balancer) evictOldHistoryLocked() {
+	type kv struct {
+		key string
+		at  time.Time
+	}
+	all := make([]kv, 0, len(b.history))
+	for key, entry := range b.history {
+		all = append(all, kv{key, entry.at})
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].at.Before(all[j].at) })
+	drop := len(all) - maxHistoryEntries*9/10
+	for i := 0; i < drop; i++ {
+		delete(b.history, all[i].key)
 	}
 }
 

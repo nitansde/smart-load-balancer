@@ -325,9 +325,9 @@ func TestFillFirstWithinTiedTier(t *testing.T) {
 		}
 		// The second pick sees profile-0 with load 1, so the tier is
 		// [profile-1, profile-2] and profile-1 wins; the third sees
-		// [profile-2]; the fourth sees all loads tied and wraps back
-		// to profile-0.
-		want := []string{"codex-profile-0", "codex-profile-1", "codex-profile-2", "codex-profile-0"}[i]
+		// [profile-2]; the fourth sees all loads tied and the
+		// last-used preference keeps profile-2.
+		want := []string{"codex-profile-0", "codex-profile-1", "codex-profile-2", "codex-profile-2"}[i]
 		if got != want {
 			t.Fatalf("pick %d = %q, want %q", i, got, want)
 		}
@@ -388,5 +388,52 @@ func TestNaturalIDLess(t *testing.T) {
 		if got := naturalIDLess(c.a, c.b); got != c.want {
 			t.Errorf("naturalIDLess(%q, %q) = %v, want %v", c.a, c.b, got, c.want)
 		}
+	}
+}
+
+// After the sticky TTL expires, the client prefers its most recently
+// used profile (soft preference, not a pin).
+func TestHistoryPreferenceAfterStickyExpiry(t *testing.T) {
+	b, clock := newTestBalancer()
+	cfg := testConfig()
+	candidates := codexCandidates(4)
+
+	if got, _ := b.Pick("key-A", candidates, cfg); got != "codex-profile-0" {
+		t.Fatalf("A first pick = %q, want codex-profile-0", got)
+	}
+	if got, _ := b.Pick("key-B", candidates, cfg); got != "codex-profile-1" {
+		t.Fatalf("B first pick = %q, want codex-profile-1", got)
+	}
+	clock.Advance(5 * time.Hour) // past the 4h sticky TTL
+
+	// Without the preference both would fill-first to codex-profile-0.
+	if got, _ := b.Pick("key-B", candidates, cfg); got != "codex-profile-1" {
+		t.Fatalf("B after expiry = %q, want codex-profile-1 (last-used preference)", got)
+	}
+	if got, _ := b.Pick("key-A", candidates, cfg); got != "codex-profile-0" {
+		t.Fatalf("A after expiry = %q, want codex-profile-0 (last-used preference)", got)
+	}
+}
+
+// The last-used preference never overrides the no-conflict guarantee:
+// a profile holding another key's active sticky stays avoided.
+func TestHistoryDoesNotOverrideNoConflict(t *testing.T) {
+	b, clock := newTestBalancer()
+	cfg := testConfig()
+	candidates := codexCandidates(8)
+
+	b.Pick("key-A", candidates, cfg) // -> codex-profile-0
+	b.Pick("key-B", candidates, cfg) // -> codex-profile-1
+	clock.Advance(3 * time.Hour)
+	b.Pick("key-A", candidates, cfg) // sticky refresh -> codex-profile-0
+	clock.Advance(time.Hour + time.Minute)
+	// B's sticky has expired; codex-profile-1 is free for C.
+	if got, _ := b.Pick("key-C", candidates, cfg); got != "codex-profile-1" {
+		t.Fatalf("C pick = %q, want codex-profile-1", got)
+	}
+	clock.Advance(time.Minute)
+	// B's last-used is codex-profile-1, but C holds an active sticky there.
+	if got, _ := b.Pick("key-B", candidates, cfg); got != "codex-profile-2" {
+		t.Fatalf("B pick = %q, want codex-profile-2 (no-conflict beats last-used)", got)
 	}
 }

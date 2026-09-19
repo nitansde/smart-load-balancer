@@ -323,3 +323,23 @@ func TestPickWithQuota_AllClaimedAllowsConflict(t *testing.T) {
 		t.Fatalf("expected fewest-claimed profile b, got %q", authID)
 	}
 }
+
+// Quota ordering still outranks the last-used preference.
+func TestPickWithQuota_HistoryBelowQuotaOrdering(t *testing.T) {
+	b, _ := newTestBalancer()
+	cfg := quotaTestConfig() // Sticky: false
+	cands := candidates("p1", "p2")
+	resolver := stubResolver{infos: map[string]QuotaInfo{
+		"p1": {Known: true, UsedPercent: pct(10)},
+		"p2": {Known: true, UsedPercent: pct(90)},
+	}}
+	// Fill-first: p2 (90% used) wins; B's last-used becomes p2.
+	if got, _ := b.PickWithQuota("key-B", cands, cfg, resolver); got != "p2" {
+		t.Fatalf("first pick = %q, want p2", got)
+	}
+	// Quota flips: p1 is now most-used. The preference for p2 must not win.
+	resolver.infos["p1"] = QuotaInfo{Known: true, UsedPercent: pct(95)}
+	if got, _ := b.PickWithQuota("key-B", cands, cfg, resolver); got != "p1" {
+		t.Fatalf("second pick = %q, want p1 (quota outranks last-used)", got)
+	}
+}
