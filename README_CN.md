@@ -55,8 +55,10 @@ K 已经有固定的 profile 了吗？
 你在管理界面点"刷新" ──▶ quota.fetch ──▶ 上游 ──▶ 快照库
                         （只在你点的时候拉）
 
-慢速兜底（两个都是 opt-in，默认关闭）：72 小时后台校准一次，
-发现窗口 reset 已过会立刻重拉
+快照过期或全新账号 ──▶ 打上待校准标记 ──▶ 下一次合适的真实
+                              请求被借道一次，响应头刷新快照。
+                              没有真实流量就不校准——插件永远
+                              不会自己伪造请求。
 ```
 
 上游返回的 `429` 会分类处理，而不是无脑重试：明确的周/月额度耗尽就 block 到窗口结束；没指明窗口的额度失败退避 5 小时；明确的瞬时限流（比如并发超限）完全不 block。
@@ -100,7 +102,7 @@ plugins:
 <details>
 <summary>高级参数（只有手改 config.yaml 才需要）</summary>
 
-`providers`、`strategy`（接受但忽略）、`sticky`、`window_seconds`（120）、`max_inflight_per_profile`（8）、`quota_enabled`（true）、`quota_providers`、`quota_refresh_seconds`（0 = 关闭，opt-in）、`quota_probe_fresh`（false，opt-in）、`quota_priorities`。
+`providers`、`strategy`（接受但忽略）、`sticky`、`window_seconds`（120）、`max_inflight_per_profile`（8）、`quota_priorities`。
 
 </details>
 
@@ -109,7 +111,7 @@ plugins:
 - **客户端身份**是入站 `Authorization`（或 `X-Api-Key`）头的 SHA-256 哈希，原始 Key 不会存储也不会打日志。
 - **永远不会弄坏请求。** 没有候选 profile、或插件被关闭时，它会放弃本次决策，主机回退到默认调度器。
 - **`strategy` 设置**为了兼容会被接受，但实际被忽略——永远按上面的排名规则选。
-- **启动新额度窗口的倒计时。** Codex 的窗口倒计时是从第一次消耗 token 才开始的。如果一次刷新发现长窗口的 reset 还在一个完整窗口之后（说明空闲、从没启动过），插件会发一条极小的 `hi` 消息把倒计时启动，否则这个 reset 时间永远不会变成真的。每个窗口只发一次，不是轮询。
+- **校准过期或全新的账号。** 插件永远不发探测请求。账号快照过期（长窗口 reset 已过）或账号全新时，会被打上待校准标记，下一次合适的真实请求会被借道一次——优先借平均 token 较小 key 的请求（每个 key 只统计最近 100 次），6 小时内等不到小请求就借任意请求。借道不改变 key 的 sticky 绑定，借了但没学到东西（非额度失败）会冷却 10 分钟再试。
 - **精确的排名规则。** Fresh 选择按以下顺序排名：(1) 你的 `quota_priorities`；(2) 被别的 Key 占用的 profile 排在没被占用的之后（只有全部被占用时才按占用数最少的选）；(3) 额度已知的排在未知之前；(4) 长窗口（周/月）reset 最早的优先——reset 时间差 1 小时内算同一时刻，没有已知 reset 的排最后；(5) 同一 tier 内 fill-first：精准 `used_percent` 高的优先，其次账本累计 token 多的，从没用过的最后；(6) 未知额度的按 host priority（数字大的优先）；(7) 近期负载最少的；(8) 这个 Key 上次用过的 profile（纯弱偏好）；(9) 自然 ID 排序，取第一个。
 
 ## 开发

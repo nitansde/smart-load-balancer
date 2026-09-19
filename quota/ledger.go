@@ -43,7 +43,6 @@ type LedgerEntry struct {
 	Requests       int64
 	BlockedUntil   time.Time
 	BlockReason    string
-	Probed         bool
 	LastObserved   time.Time
 }
 
@@ -54,7 +53,7 @@ func (e LedgerEntry) Blocked(now time.Time) bool {
 
 // Fresh reports whether the profile has never been observed in use.
 func (e LedgerEntry) Fresh() bool {
-	return !e.Probed && e.Requests == 0 && e.ConsumedTokens == 0
+	return e.Requests == 0 && e.ConsumedTokens == 0
 }
 
 // Ledger tracks estimated quota consumption per auth ID from usage
@@ -130,21 +129,6 @@ func (l *Ledger) Get(authID string) (LedgerEntry, bool) {
 		return LedgerEntry{}, false
 	}
 	return *e, true
-}
-
-// MarkProbed records that the fresh-window ping was already sent.
-func (l *Ledger) MarkProbed(authID string) {
-	if authID == "" {
-		return
-	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	e, ok := l.m[authID]
-	if !ok {
-		e = &LedgerEntry{AuthID: authID, WindowStart: time.Now()}
-		l.m[authID] = e
-	}
-	e.Probed = true
 }
 
 // detectExhaustion inspects a failed request for an upstream quota signal.

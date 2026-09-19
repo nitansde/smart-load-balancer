@@ -11,8 +11,8 @@ import (
 	"github.com/nitansde/smart-load-balancer/quota"
 )
 
-// A monthly long-window reset that already passed must trigger the same
-// on-demand re-fetch as a weekly one.
+// A monthly long-window reset that already passed must mark the account
+// for calibration the same way a weekly one does.
 func TestLongWindowResetPassed_Monthly(t *testing.T) {
 	now := time.Now()
 	up := 50.0
@@ -21,14 +21,14 @@ func TestLongWindowResetPassed_Monthly(t *testing.T) {
 		Long:   &quota.Window{Kind: quota.WindowMonthly, UsedPercent: &up, ResetAt: now.Add(-time.Hour)},
 	}
 	if !longWindowResetPassed(passed, now) {
-		t.Fatal("passed monthly reset must trigger a re-fetch")
+		t.Fatal("passed monthly reset must mark for calibration")
 	}
 	future := quota.Snapshot{
 		AuthID: "a",
 		Long:   &quota.Window{Kind: quota.WindowMonthly, UsedPercent: &up, ResetAt: now.Add(20 * 24 * time.Hour)},
 	}
 	if longWindowResetPassed(future, now) {
-		t.Fatal("future monthly reset must not trigger a re-fetch")
+		t.Fatal("future monthly reset must not mark for calibration")
 	}
 }
 

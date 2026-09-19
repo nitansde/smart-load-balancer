@@ -53,7 +53,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"sync"
 	"sync/atomic"
 	"time"
 	"unsafe"
@@ -68,7 +67,7 @@ import (
 
 const (
 	pluginID      = "smart-load-balancer"
-	pluginVersion = "0.1.3"
+	pluginVersion = "0.1.4"
 	pluginAuthor  = "nitansde"
 	pluginRepo    = "https://github.com/nitansde/smart-load-balancer"
 	// quotaProviderIdentifier is the provider key this plugin serves
@@ -81,14 +80,15 @@ var (
 	loadBalancer  = balancer.New()
 
 	// hostAPI is the host callback table captured at plugin init. It lets
-	// the quota refresher ask the host for auth credentials and perform
-	// upstream HTTP requests without touching raw sockets.
+	// manual quota refresh (management UI) ask the host for auth
+	// credentials and perform upstream HTTP requests without touching
+	// raw sockets.
 	hostAPI atomic.Pointer[C.cliproxy_host_api]
 
 	// quotaStore holds the latest precise upstream quota snapshots.
-	// Snapshots come from background calibration or from manual refreshes
-	// through the quota provider; the usage-feedback ledger is the primary
-	// quota signal and needs no polling.
+	// Snapshots come from manual refreshes through the quota provider and
+	// from response headers harvested passively by usage.handle; the
+	// usage-feedback ledger is the primary quota signal.
 	quotaStore = quota.NewStore()
 
 	// quotaLedger estimates quota consumption per profile from usage
@@ -96,9 +96,16 @@ var (
 	// ordering.
 	quotaLedger = quota.NewLedger()
 
-	quotaRefresherMu sync.Mutex
-	quotaRefresher   *quota.Refresher
+	// divertState holds calibration-diversion state: per-key input-token
+	// statistics and the set of accounts waiting for a borrowed request.
+	// The plugin never synthesizes its own traffic; stale or cold accounts
+	// are calibrated by borrowing one real request at a time.
+	divertState = balancer.NewDivertState()
 )
+
+func init() {
+	loadBalancer.SetDivertState(divertState)
+}
 
 type envelope struct {
 	OK     bool            `json:"ok"`
@@ -296,44 +303,8 @@ func (cgoHostClient) DoHTTP(req quota.HTTPRequest) (quota.HTTPResponse, error) {
 	return quota.HTTPResponse{StatusCode: resp.StatusCode, Body: resp.Body}, nil
 }
 
-// quotaRefresherConfig reads the live balancer config into a quota.Config so
-// plugin.reconfigure takes effect without restarting the refresher.
-// An interval of 0 disables background calibration (on-demand only).
-func quotaRefresherConfig() quota.Config {
-	cfg, _ := currentConfig.Load().(balancer.Config)
-	return quota.Config{
-		Enabled:    cfg.QuotaEnabled,
-		Providers:  cfg.QuotaProviders,
-		Interval:   time.Duration(cfg.QuotaRefreshSeconds) * time.Second,
-		ProbeFresh: cfg.QuotaProbeFresh,
-	}
-}
-
-// ensureQuotaRefresher creates and starts the background quota calibrator once.
-func ensureQuotaRefresher() {
-	quotaRefresherMu.Lock()
-	defer quotaRefresherMu.Unlock()
-	if !loadedConfig().Enabled {
-		if quotaRefresher != nil {
-			quotaRefresher.Stop()
-		}
-		return
-	}
-	if quotaRefresher == nil {
-		quotaRefresher = quota.NewRefresher(cgoHostClient{}, quotaStore, quotaLedger, quotaRefresherConfig)
-	}
-	quotaRefresher.Start()
-}
-
 //export cliproxyPluginShutdown
-func cliproxyPluginShutdown() {
-	quotaRefresherMu.Lock()
-	r := quotaRefresher
-	quotaRefresherMu.Unlock()
-	if r != nil {
-		r.Stop()
-	}
-}
+func cliproxyPluginShutdown() {}
 
 func handleMethod(method string, request []byte) ([]byte, error) {
 	switch method {
@@ -381,7 +352,6 @@ func configure(raw []byte) error {
 		return errValidate
 	}
 	currentConfig.Store(cfg)
-	ensureQuotaRefresher()
 	return nil
 }
 
@@ -445,10 +415,6 @@ func pickAuth(raw []byte) ([]byte, error) {
 	}
 	keyHash := balancer.ClientKeyHash(http.Header(req.Options.Headers))
 	authID, handled := loadBalancer.PickWithQuota(keyHash, candidates, cfg, &quotaResolver{now: time.Now})
-	if handled && authID != "" {
-		// Tell the quota calibrator this profile's numbers may have moved.
-		quotaStore.MarkUsed(authID)
-	}
 	return okEnvelope(pluginapi.SchedulerPickResponse{
 		AuthID:  authID,
 		Handled: handled,
@@ -471,6 +437,10 @@ func handleUsage(raw []byte) ([]byte, error) {
 	if observedAt.IsZero() {
 		observedAt = time.Now()
 	}
+	blockedBefore := false
+	if entry, ok := quotaLedger.Get(rec.AuthID); ok {
+		blockedBefore = entry.Blocked(observedAt)
+	}
 	quotaLedger.Observe(quota.UsageObservation{
 		AuthID:          rec.AuthID,
 		Provider:        rec.Provider,
@@ -485,8 +455,27 @@ func handleUsage(raw []byte) ([]byte, error) {
 	// latest window numbers in the response headers (the host merges the
 	// upstream quota event into them). Zero extra fetches; active profiles
 	// stay calibrated from traffic alone.
+	harvested := false
 	if snap, ok := quota.SnapshotFromHeaders(rec.AuthID, rec.Provider, http.Header(rec.ResponseHeaders), observedAt); ok {
 		quotaStore.MergeSnapshot(snap)
+		harvested = true
+	}
+	// Feed the calibration-diversion statistics: attribute this request's
+	// input tokens to its client key (hashed the same way as the pick
+	// path; only the SHA-256 digest is kept).
+	if !rec.Failed {
+		divertState.Stats.Observe(balancer.KeyHashForValue(rec.APIKey), rec.Detail.InputTokens)
+	}
+	// Clear the calibration mark when this request taught us something:
+	// passive headers on success, or a quota classification (429) on
+	// failure. Any other failure keeps the mark; the attempt cooldown
+	// paces the next borrow.
+	if harvested {
+		divertState.Pending.Clear(rec.AuthID)
+	} else if rec.Failed && !blockedBefore {
+		if entry, ok := quotaLedger.Get(rec.AuthID); ok && entry.Blocked(observedAt) {
+			divertState.Pending.Clear(rec.AuthID)
+		}
 	}
 	return okEnvelope(struct{}{})
 }
@@ -501,8 +490,7 @@ type quotaFetchRequest struct {
 // handleQuotaFetch serves manual quota refreshes from the management UI.
 // The host routes the user's "refresh quota" click here; the fetched
 // snapshot updates the store as a side effect, so a manual refresh also
-// recalibrates the scheduler's fill-first ordering. Same code path as the
-// background calibrator, never duplicated work.
+// recalibrates the scheduler's fill-first ordering.
 func handleQuotaFetch(raw []byte) ([]byte, error) {
 	var req quotaFetchRequest
 	if errUnmarshal := json.Unmarshal(raw, &req); errUnmarshal != nil {
@@ -606,12 +594,12 @@ func (r *quotaResolver) Lookup(authID, provider string) balancer.QuotaInfo {
 			info.LongResetAt = snap.Long.NextReset(now)
 		}
 		// A long-window (weekly or monthly) reset that already passed
-		// means the snapshot numbers are stale: fetch fresh quota now
-		// instead of waiting for the next background cycle. The
-		// five-hour window is tracked locally from usage feedback,
-		// not re-fetched.
+		// means the snapshot numbers are stale: mark the account for
+		// calibration. The next suitable real request is borrowed for
+		// one shot to refresh it; the five-hour window is tracked
+		// locally from usage feedback, not re-fetched.
 		if longWindowResetPassed(snap, now) {
-			refreshQuotaNow(authID)
+			divertState.Pending.Mark(authID)
 		}
 		if snap.Exhausted() {
 			// A precise snapshot reporting exhaustion blocks the profile
@@ -624,9 +612,11 @@ func (r *quotaResolver) Lookup(authID, provider string) balancer.QuotaInfo {
 	if !info.Known && quota.HasEndpoint(provider) {
 		// A never-touched profile of a quota-tracked provider is known to
 		// be at 100% remaining: the scheduler owns all routing, so nothing
-		// else could have consumed it (drift is corrected by calibration).
+		// else could have consumed it. Mark it for calibration anyway so a
+		// borrowed real request teaches us its real snapshot on first use.
 		info.Known = true
 		info.Fresh = true
+		divertState.Pending.Mark(authID)
 	}
 	return info
 }
@@ -639,20 +629,6 @@ func (r *quotaResolver) Lookup(authID, provider string) balancer.QuotaInfo {
 func longWindowResetPassed(snap quota.Snapshot, now time.Time) bool {
 	w := snap.Long
 	return w != nil && !w.ResetAt.IsZero() && !w.ResetAt.After(now)
-}
-
-// refreshQuotaNow asks the quota refresher to re-fetch authID's quota
-// snapshot. The fetch is single-flighted per auth and spaced at least ten
-// minutes from other on-demand fetches; a failed fetch cools the auth down
-// for five hours. Safe to call from the pick path.
-func refreshQuotaNow(authID string) {
-	quotaRefresherMu.Lock()
-	r := quotaRefresher
-	quotaRefresherMu.Unlock()
-	if r == nil {
-		return
-	}
-	r.RefreshAuthNow(authID)
 }
 
 func okEnvelope(v any) ([]byte, error) {

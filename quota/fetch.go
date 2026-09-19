@@ -1,11 +1,53 @@
 package quota
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
 )
+
+const (
+	// codexUsageEndpoint reports five-hour/weekly/monthly quota windows.
+	codexUsageEndpoint = "https://chatgpt.com/backend-api/wham/usage"
+	codexUserAgent     = "codex_cli_rs/0.76.0"
+)
+
+// usageEndpoints maps a provider to its quota endpoint. Providers without an
+// entry are skipped: we only query endpoints we understand.
+var usageEndpoints = map[string]string{
+	"codex": codexUsageEndpoint,
+}
+
+// AuthEntry describes one host auth record.
+type AuthEntry struct {
+	ID        string
+	AuthIndex string
+	Provider  string
+}
+
+// HTTPRequest is a plain outbound HTTP request executed by the host.
+type HTTPRequest struct {
+	Method  string
+	URL     string
+	Headers map[string]string
+	Body    []byte
+}
+
+// HTTPResponse is the host-executed HTTP response.
+type HTTPResponse struct {
+	StatusCode int
+	Body       []byte
+}
+
+// HostClient abstracts the host callbacks used for quota fetching so the
+// fetch stays testable without cgo.
+type HostClient interface {
+	ListAuths() ([]AuthEntry, error)
+	GetAuthJSON(authIndex string) (json.RawMessage, error)
+	DoHTTP(req HTTPRequest) (HTTPResponse, error)
+}
 
 // CredentialsForAuth reads the credential JSON for an auth entry through
 // the host and extracts the Codex access token and account ID.
@@ -65,7 +107,6 @@ func FetchSnapshot(client HostClient, auth AuthEntry) (Snapshot, error) {
 		FetchedAt: time.Now(),
 	}, nil
 }
-
 func usageHeaders(creds Credentials) map[string]string {
 	headers := map[string]string{
 		"Authorization": "Bearer " + creds.AccessToken,
@@ -76,18 +117,4 @@ func usageHeaders(creds Credentials) map[string]string {
 		headers["Chatgpt-Account-Id"] = creds.ChatGPTAccountID
 	}
 	return headers
-}
-
-// ProbeFreshWindow sends one minimal request to start a never-used long
-// window's countdown. Best effort: failures just leave the window fresh.
-func ProbeFreshWindow(doHTTP func(HTTPRequest) (HTTPResponse, error), creds Credentials) {
-	if doHTTP == nil || creds.AccessToken == "" {
-		return
-	}
-	_, _ = doHTTP(HTTPRequest{
-		Method:  http.MethodPost,
-		URL:     codexProbeEndpoint,
-		Headers: usageHeaders(creds),
-		Body:    []byte(codexProbePayload),
-	})
 }

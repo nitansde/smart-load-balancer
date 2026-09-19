@@ -2,10 +2,6 @@ package quota
 
 import (
 	"encoding/json"
-	"errors"
-	"net/http"
-	"strings"
-	"sync"
 	"testing"
 	"time"
 )
@@ -26,13 +22,6 @@ const sampleUsage = `{
 	}
 }`
 
-const freshUsage = `{
-	"plan_type": "pro",
-	"rate_limit": {
-		"primary_window": {"used_percent": 0, "limit_window_seconds": 18000, "reset_at": "2026-09-18T20:00:00Z"},
-		"secondary_window": {"used_percent": 0, "limit_window_seconds": 604800, "reset_at": "2026-09-25T12:00:00Z"}
-	}
-}`
 
 const exhaustedUsage = `{
 	"rate_limit": {
@@ -41,15 +30,6 @@ const exhaustedUsage = `{
 	}
 }`
 
-// resetUsage: long window back at 100% with no reset_at — the new window's
-// countdown hasn't started (Codex starts it on first token use).
-const resetUsage = `{
-	"plan_type": "pro",
-	"rate_limit": {
-		"primary_window": {"used_percent": 0, "limit_window_seconds": 18000, "reset_at": "2026-09-18T20:00:00Z"},
-		"secondary_window": {"used_percent": 0, "limit_window_seconds": 604800}
-	}
-}`
 
 func TestParseUsage(t *testing.T) {
 	parsed, err := ParseUsage([]byte(sampleUsage), time.Now())
@@ -140,213 +120,6 @@ func TestExtractCodexCredentials(t *testing.T) {
 	}
 	if _, err := ExtractCodexCredentials(json.RawMessage(`{}`)); err == nil {
 		t.Error("expected error for missing access_token")
-	}
-}
-
-// fakeHostClient is an in-memory HostClient for refresher tests.
-type fakeHostClient struct {
-	mu       sync.Mutex
-	auths    []AuthEntry
-	authJSON map[string]json.RawMessage
-	usage    map[string][]byte
-	requests []HTTPRequest
-}
-
-func (f *fakeHostClient) ListAuths() ([]AuthEntry, error) { return f.auths, nil }
-
-func (f *fakeHostClient) GetAuthJSON(authIndex string) (json.RawMessage, error) {
-	if raw, ok := f.authJSON[authIndex]; ok {
-		return raw, nil
-	}
-	return nil, errors.New("no such auth")
-}
-
-func (f *fakeHostClient) DoHTTP(req HTTPRequest) (HTTPResponse, error) {
-	f.mu.Lock()
-	f.requests = append(f.requests, req)
-	f.mu.Unlock()
-	// Match usage calls by URL; everything else is a probe.
-	if req.URL == codexUsageEndpoint {
-		token := strings.TrimPrefix(req.Headers["Authorization"], "Bearer ")
-		if body, ok := f.usage[token]; ok && token != "" {
-			return HTTPResponse{StatusCode: 200, Body: body}, nil
-		}
-		return HTTPResponse{StatusCode: 401}, nil
-	}
-	return HTTPResponse{StatusCode: 200, Body: []byte(`{}`)}, nil
-}
-
-func testConfig() Config {
-	return Config{Enabled: true, Providers: []string{"codex"}, Interval: time.Minute}
-}
-
-func TestRefresherPopulatesStore(t *testing.T) {
-	client := &fakeHostClient{
-		auths: []AuthEntry{
-			{ID: "auth-1", AuthIndex: "0", Provider: "codex"},
-			{ID: "auth-2", AuthIndex: "1", Provider: "codex"},
-			{ID: "auth-3", AuthIndex: "2", Provider: "anthropic"}, // no endpoint: skipped
-		},
-		authJSON: map[string]json.RawMessage{
-			"0": json.RawMessage(`{"access_token":"tok-a","account_id":"acc-a"}`),
-			"1": json.RawMessage(`{"access_token":"tok-b","account_id":"acc-b"}`),
-		},
-		usage: map[string][]byte{
-			"tok-a": []byte(sampleUsage),
-			"tok-b": []byte(freshUsage),
-		},
-	}
-	store := NewStore()
-	r := NewRefresher(client, store, nil, testConfig)
-	r.spread = time.Millisecond
-	r.RefreshOnce()
-
-	snap, ok := store.Get("auth-1")
-	if !ok {
-		t.Fatal("auth-1 snapshot missing")
-	}
-	if snap.Long == nil || snap.LongUsedPercent() != 78.0 {
-		t.Errorf("auth-1 long used = %v", snap.LongUsedPercent())
-	}
-	if snap.FiveHour == nil || snap.FiveHour.UsedPercent == nil || *snap.FiveHour.UsedPercent != 42.5 {
-		t.Errorf("auth-1 five hour = %+v", snap.FiveHour)
-	}
-	snap2, ok := store.Get("auth-2")
-	if !ok || !snap2.Fresh() {
-		t.Errorf("auth-2 should be fresh: %+v ok=%v", snap2, ok)
-	}
-	if _, ok := store.Get("auth-3"); ok {
-		t.Error("auth-3 (unsupported provider) should not have a snapshot")
-	}
-	// Auth header must carry the bearer token.
-	found := false
-	for _, req := range client.requests {
-		if req.URL == codexUsageEndpoint && req.Headers["Authorization"] == "Bearer tok-a" {
-			found = true
-		}
-	}
-	if !found {
-		t.Error("usage request missing bearer auth header")
-	}
-}
-
-func TestRefresherProbeFresh(t *testing.T) {
-	client := &fakeHostClient{
-		auths:    []AuthEntry{{ID: "auth-1", AuthIndex: "0", Provider: "codex"}},
-		authJSON: map[string]json.RawMessage{"0": json.RawMessage(`{"access_token":"tok-a"}`)},
-		// 100% with no reset_at: the new window's countdown hasn't started.
-		usage: map[string][]byte{"tok-a": []byte(resetUsage)},
-	}
-	store := NewStore()
-	cfg := testConfig()
-	cfg.ProbeFresh = true
-	r := NewRefresher(client, store, nil, func() Config { return cfg })
-	r.spread = time.Millisecond
-	r.RefreshOnce()
-	r.RefreshOnce() // second cycle is not due: must not kick again
-
-	probes := 0
-	for _, req := range client.requests {
-		if req.URL == codexProbeEndpoint {
-			probes++
-			if req.Method != http.MethodPost {
-				t.Errorf("probe method = %s", req.Method)
-			}
-		}
-	}
-	if probes != 1 {
-		t.Errorf("probe sent %d times, want exactly 1", probes)
-	}
-}
-
-func TestRefresherDisabled(t *testing.T) {
-	client := &fakeHostClient{
-		auths:    []AuthEntry{{ID: "auth-1", AuthIndex: "0", Provider: "codex"}},
-		authJSON: map[string]json.RawMessage{"0": json.RawMessage(`{"access_token":"tok-a"}`)},
-		usage:    map[string][]byte{"tok-a": []byte(sampleUsage)},
-	}
-	store := NewStore()
-	cfg := testConfig()
-	cfg.Enabled = false
-	r := NewRefresher(client, store, nil, func() Config { return cfg })
-	r.RefreshOnce()
-	if _, ok := store.Get("auth-1"); ok {
-		t.Error("disabled refresher should not populate the store")
-	}
-	if len(client.requests) != 0 {
-		t.Errorf("disabled refresher made %d requests", len(client.requests))
-	}
-}
-
-func TestNeedsRefresh(t *testing.T) {
-	now := time.Now()
-	auth := AuthEntry{ID: "auth-1", AuthIndex: "0", Provider: "codex"}
-	newRefresher := func(store *Store) *Refresher {
-		return NewRefresher(&fakeHostClient{}, store, nil, testConfig)
-	}
-
-	// Never fetched -> refresh.
-	if !newRefresher(NewStore()).needsRefresh(auth, testConfig(), now) {
-		t.Error("never-fetched auth should need refresh")
-	}
-
-	// Fresh snapshot, no picks, reset in the future, young -> skip.
-	fresh := NewStore()
-	used := 10.0
-	fresh.Set(Snapshot{
-		AuthID:    "auth-1",
-		FiveHour:  &Window{Kind: WindowFiveHour, UsedPercent: &used, ResetAt: now.Add(time.Hour)},
-		Long:      &Window{Kind: WindowWeekly, UsedPercent: &used, ResetAt: now.Add(24 * time.Hour)},
-		FetchedAt: now.Add(-time.Minute),
-	})
-	if newRefresher(fresh).needsRefresh(auth, testConfig(), now) {
-		t.Error("idle fresh snapshot should not need refresh")
-	}
-
-	// Pick routed after the fetch -> refresh.
-	used2 := NewStore()
-	used2.Set(Snapshot{AuthID: "auth-1", FetchedAt: now.Add(-time.Hour)})
-	used2.MarkUsed("auth-1")
-	// MarkUsed stamps time.Now(); ensure it is after FetchedAt.
-	if !newRefresher(used2).needsRefresh(auth, testConfig(), time.Now()) {
-		t.Error("auth used after fetch should need refresh")
-	}
-
-	// Reset time passed -> refresh.
-	reset := NewStore()
-	reset.Set(Snapshot{
-		AuthID:    "auth-1",
-		Long:      &Window{Kind: WindowWeekly, UsedPercent: &used, ResetAt: now.Add(-time.Minute)},
-		FetchedAt: now.Add(-time.Hour),
-	})
-	if !newRefresher(reset).needsRefresh(auth, testConfig(), now) {
-		t.Error("auth past its reset time should need refresh")
-	}
-
-	// Older than maxStale -> refresh (backstop for external use).
-	stale := NewStore()
-	stale.Set(Snapshot{
-		AuthID:    "auth-1",
-		Long:      &Window{Kind: WindowWeekly, UsedPercent: &used, ResetAt: now.Add(24 * time.Hour)},
-		FetchedAt: now.Add(-7 * time.Hour),
-	})
-	if !newRefresher(stale).needsRefresh(auth, testConfig(), now) {
-		t.Error("snapshot older than maxStale should need refresh")
-	}
-}
-
-func TestRefresherPrunesRemovedAuths(t *testing.T) {
-	client := &fakeHostClient{
-		auths:    []AuthEntry{{ID: "auth-1", AuthIndex: "0", Provider: "codex"}},
-		authJSON: map[string]json.RawMessage{"0": json.RawMessage(`{"access_token":"tok-a"}`)},
-		usage:    map[string][]byte{"tok-a": []byte(sampleUsage)},
-	}
-	store := NewStore()
-	store.Set(Snapshot{AuthID: "auth-gone", Provider: "codex"})
-	r := NewRefresher(client, store, nil, testConfig)
-	r.RefreshOnce()
-	if _, ok := store.Get("auth-gone"); ok {
-		t.Error("snapshot for removed auth should be pruned")
 	}
 }
 

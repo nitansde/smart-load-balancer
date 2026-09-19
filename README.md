@@ -55,8 +55,11 @@ every request ──▶ usage.handle ──▶ ledger: tokens spent, 429 blocks
 you click "refresh" ──▶ quota.fetch ──▶ upstream ──▶ snapshot store
 in the management UI      (only when you ask)
 
-slow safety net (both opt-in, off by default): a background re-check
-every 72h, plus an instant re-check when a window reset is noticed
+stale or cold account ──▶ marked for calibration ──▶ the next suitable
+                              real request is borrowed for one shot;
+                              its response headers refresh the snapshot.
+                              No real traffic? No calibration — the plugin
+                              never invents requests of its own.
 ```
 
 A `429` from upstream is classified, not just retried: an explicit weekly/monthly exhaustion blocks the profile until the window ends; a quota failure that names no window backs off 5 hours; a clearly transient limit (e.g. too many concurrent requests) doesn't block at all.
@@ -100,7 +103,7 @@ The management UI shows only two options; everything else keeps sane built-in de
 <details>
 <summary>Advanced knobs (only if you hand-edit config.yaml)</summary>
 
-`providers`, `strategy` (accepted but ignored), `sticky`, `window_seconds` (120), `max_inflight_per_profile` (8), `quota_enabled` (true), `quota_providers`, `quota_refresh_seconds` (0 = off, opt-in), `quota_probe_fresh` (false, opt-in), `quota_priorities`.
+`providers`, `strategy` (accepted but ignored), `sticky`, `window_seconds` (120), `max_inflight_per_profile` (8), `quota_priorities`.
 
 </details>
 
@@ -109,7 +112,7 @@ The management UI shows only two options; everything else keeps sane built-in de
 - **Client identity** is a SHA-256 hash of the inbound `Authorization` (or `X-Api-Key`) header. Raw key material is never stored or logged.
 - **It never breaks requests.** If no candidate matches, or the plugin is off, it declines the pick and the host falls back to its default scheduler.
 - **The `strategy` setting** is accepted for compatibility but ignored — the ranking above always decides.
-- **Starting a fresh quota window.** Codex only starts a window's countdown on first token use. When a refresh shows a long window whose reset is still a full window away (idle, never started), the plugin sends one minimal `hi` message to start the countdown — otherwise that reset time would never become real. One tiny request per window, never a poll loop.
+- **Calibrating a stale or new account.** The plugin never sends probe requests. When an account's snapshot goes stale (a long-window reset passed) or an account is brand new, it is marked for calibration and the next suitable real request is borrowed for one shot — preferably from a key whose recent requests average small token counts (each key's last 100 requests). If no small-key traffic shows up within 6 hours, any key's request may be borrowed. The borrowed request never changes the key's sticky pinning, and a borrow that teaches nothing (non-quota failure) cools down for 10 minutes before retrying.
 - **Ranking, precisely.** Fresh selection orders candidates: (1) your `quota_priorities`; (2) profiles claimed by other keys sort after unclaimed ones (only when every candidate is claimed does fewest-claimed win); (3) quota-known before unknown; (4) long-window (weekly/monthly) reset-soonest first — resets within 1 hour count as the same moment, unknown resets rank last; (5) fill-first within a tier: highest precise `used_percent`, else highest ledger token count, never-used last; (6) unknown-quota profiles follow host priority (higher first); (7) least recent load; (8) the key's last-used profile (soft hint only); (9) natural ID order, head wins.
 
 ## Development

@@ -86,13 +86,16 @@ func TestLedgerNonQuota429DoesNotBlock(t *testing.T) {
 	}
 }
 
-func TestLedgerMarkProbedClearsFresh(t *testing.T) {
+func TestLedgerFreshClearedByUsage(t *testing.T) {
 	l := NewLedger()
-	l.Observe(UsageObservation{AuthID: "a", TotalTokens: 5, ObservedAt: time.Now()})
-	l.MarkProbed("a")
 	entry, _ := l.Get("a")
-	if !entry.Probed || entry.Fresh() {
-		t.Fatalf("expected probed and no longer fresh, got %+v", entry)
+	if !entry.Fresh() {
+		t.Fatalf("missing entry should read fresh, got %+v", entry)
+	}
+	l.Observe(UsageObservation{AuthID: "a", TotalTokens: 5, ObservedAt: time.Now()})
+	entry, _ = l.Get("a")
+	if entry.Fresh() {
+		t.Fatalf("observed entry should no longer be fresh, got %+v", entry)
 	}
 }
 

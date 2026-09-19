@@ -1,8 +1,6 @@
 package balancer
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"net/http"
 	"sort"
 	"strings"
@@ -85,6 +83,9 @@ type Balancer struct {
 	picks   []pickRecord
 	sticky  map[string]stickyEntry
 	history map[string]historyEntry
+	// divert, when non-nil, lets the pick path borrow one real request at
+	// a time to calibrate a stale or cold account. See divert.go.
+	divert *DivertState
 }
 
 // New returns a Balancer using the real clock.
@@ -97,6 +98,14 @@ func newWithClock(now func() time.Time) *Balancer {
 	return &Balancer{now: now, sticky: make(map[string]stickyEntry), history: make(map[string]historyEntry)}
 }
 
+// SetDivertState attaches calibration-diversion state. A nil state
+// disables diversion.
+func (b *Balancer) SetDivertState(d *DivertState) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.divert = d
+}
+
 // ClientKeyHash derives a stable, non-reversible identity for the calling
 // client from inbound request headers. Only the SHA-256 hex digest is kept;
 // raw key material is never stored or logged.
@@ -105,21 +114,9 @@ func ClientKeyHash(headers http.Header) string {
 		return ""
 	}
 	for _, name := range []string{"Authorization", "X-Api-Key", "X-Goog-Api-Key"} {
-		value := strings.TrimSpace(firstHeaderValue(headers, name))
-		if value == "" {
-			continue
+		if h := KeyHashForValue(firstHeaderValue(headers, name)); h != "" {
+			return h
 		}
-		if idx := strings.Index(value, " "); idx > 0 {
-			scheme := strings.ToLower(strings.TrimSpace(value[:idx]))
-			if scheme == "bearer" || scheme == "apikey" || scheme == "token" {
-				value = strings.TrimSpace(value[idx+1:])
-			}
-		}
-		if value == "" {
-			continue
-		}
-		sum := sha256.Sum256([]byte("smart-load-balancer/v1:" + value))
-		return hex.EncodeToString(sum[:])
 	}
 	return ""
 }
@@ -180,6 +177,20 @@ func (b *Balancer) PickWithQuota(keyHash string, candidates []Candidate, cfg Con
 	}
 	if len(eligible) == 0 {
 		return "", false
+	}
+	// Calibration diversion: borrow one real request to refresh a stale
+	// or cold account's snapshot. One-shot and sticky-free: borrowing a
+	// request must not pin the client key to the borrowed profile.
+	if target, ok := b.divertTarget(keyHash, eligible, now); ok {
+		b.mu.Lock()
+		b.pruneLocked(now, cfg)
+		b.recordDivertedLocked(target, keyHash, now)
+		d := b.divert
+		b.mu.Unlock()
+		if d != nil && d.Pending != nil {
+			d.Pending.Attempted(target)
+		}
+		return target, true
 	}
 	if len(eligible) == 1 {
 		b.record(eligible[0].ID, keyHash, cfg)
@@ -464,6 +475,22 @@ func (b *Balancer) recordLocked(authID, keyHash string, now time.Time, cfg Confi
 				}
 			}
 		}
+	}
+}
+
+// recordDivertedLocked records a calibration-diverted pick: load and
+// history move, but no sticky is created — borrowing one request must not
+// pin the client key to the borrowed profile.
+func (b *Balancer) recordDivertedLocked(authID, keyHash string, now time.Time) {
+	b.picks = append(b.picks, pickRecord{authID: authID, at: now})
+	if keyHash != "" {
+		b.history[keyHash] = historyEntry{authID: authID, at: now}
+		if len(b.history) > maxHistoryEntries {
+			b.evictOldHistoryLocked()
+		}
+	}
+	if overflow := len(b.picks) - MaxPickHistory; overflow > 0 {
+		b.picks = append([]pickRecord(nil), b.picks[overflow:]...)
 	}
 }
 
