@@ -55,8 +55,8 @@ every request ──▶ usage.handle ──▶ ledger: tokens spent, 429 blocks
 you click "refresh" ──▶ quota.fetch ──▶ upstream ──▶ snapshot store
 in the management UI      (only when you ask)
 
-slow safety net: a background re-check every 72h, plus an instant
-re-check when a window reset is noticed (both can be turned off)
+slow safety net (both opt-in, off by default): a background re-check
+every 72h, plus an instant re-check when a window reset is noticed
 ```
 
 A `429` from upstream is classified, not just retried: an explicit weekly/monthly exhaustion blocks the profile until the window ends; a quota failure that names no window backs off 5 hours; a clearly transient limit (e.g. too many concurrent requests) doesn't block at all.
@@ -100,7 +100,7 @@ The management UI shows only two options; everything else keeps sane built-in de
 <details>
 <summary>Advanced knobs (only if you hand-edit config.yaml)</summary>
 
-`providers`, `strategy` (accepted but ignored), `sticky`, `window_seconds` (120), `max_inflight_per_profile` (8), `quota_enabled` (true), `quota_providers`, `quota_refresh_seconds` (72h, `0` disables), `quota_probe_fresh` (true), `quota_priorities`.
+`providers`, `strategy` (accepted but ignored), `sticky`, `window_seconds` (120), `max_inflight_per_profile` (8), `quota_enabled` (true), `quota_providers`, `quota_refresh_seconds` (0 = off, opt-in), `quota_probe_fresh` (false, opt-in), `quota_priorities`.
 
 </details>
 

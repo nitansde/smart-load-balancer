@@ -89,7 +89,7 @@ func TestRefreshAuthNow_FetchesStaleSnapshot(t *testing.T) {
 		Long:      &Window{Kind: WindowWeekly, UsedPercent: &up, ResetAt: now.Add(-time.Hour)},
 		FetchedAt: now.Add(-time.Hour),
 	})
-	r := NewRefresher(client, store, nil, func() Config { return Config{Enabled: true} })
+	r := NewRefresher(client, store, nil, func() Config { return Config{Enabled: true, Interval: time.Hour} })
 
 	r.RefreshAuthNow("a")
 
@@ -106,6 +106,22 @@ func TestRefreshAuthNow_FetchesStaleSnapshot(t *testing.T) {
 	}
 }
 
+func TestRefreshAuthNow_DisabledWhenIntervalZero(t *testing.T) {
+	client := &stubHostClient{
+		auths:     []AuthEntry{{ID: "a", AuthIndex: "0", Provider: "codex"}},
+		usageBody: usageBodyWithReset(t, time.Now().Add(5*time.Hour)),
+	}
+	store := NewStore()
+	// Interval 0 means background calibration (and therefore on-demand
+	// refresh) is disabled: the plugin must make no active requests.
+	r := NewRefresher(client, store, nil, func() Config { return Config{Enabled: true} })
+	r.RefreshAuthNow("a")
+	time.Sleep(200 * time.Millisecond)
+	if n := client.calls(); n != 0 {
+		t.Fatalf("expected no fetch with interval 0, got %d", n)
+	}
+}
+
 func TestRefreshAuthNow_SingleFlight(t *testing.T) {
 	now := time.Now()
 	client := &stubHostClient{
@@ -113,7 +129,7 @@ func TestRefreshAuthNow_SingleFlight(t *testing.T) {
 		usageBody: usageBodyWithReset(t, now.Add(5*time.Hour)),
 	}
 	store := NewStore()
-	r := NewRefresher(client, store, nil, func() Config { return Config{Enabled: true} })
+	r := NewRefresher(client, store, nil, func() Config { return Config{Enabled: true, Interval: time.Hour} })
 
 	for i := 0; i < 10; i++ {
 		r.RefreshAuthNow("a")
@@ -157,7 +173,7 @@ func TestRefreshAuthNow_UnknownAuthDropsSnapshot(t *testing.T) {
 		Provider: "codex",
 		Long:     &Window{Kind: WindowWeekly, UsedPercent: &up},
 	})
-	r := NewRefresher(client, store, nil, func() Config { return Config{Enabled: true} })
+	r := NewRefresher(client, store, nil, func() Config { return Config{Enabled: true, Interval: time.Hour} })
 
 	r.RefreshAuthNow("gone")
 	waitFor(t, 3*time.Second, func() bool {
@@ -241,7 +257,7 @@ func TestRefreshAuthNow_SpacedApart(t *testing.T) {
 		usageBody: usageBodyWithReset(t, now.Add(5*time.Hour)),
 	}
 	store := NewStore()
-	r := NewRefresher(client, store, nil, func() Config { return Config{Enabled: true} })
+	r := NewRefresher(client, store, nil, func() Config { return Config{Enabled: true, Interval: time.Hour} })
 	r.fetchGap = 200 * time.Millisecond
 
 	r.RefreshAuthNow("a")

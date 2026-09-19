@@ -55,8 +55,8 @@ K 已经有固定的 profile 了吗？
 你在管理界面点"刷新" ──▶ quota.fetch ──▶ 上游 ──▶ 快照库
                         （只在你点的时候拉）
 
-慢速兜底：72 小时后台校准一次，发现窗口 reset 已过会立刻重拉
-（两个都可以关）
+慢速兜底（两个都是 opt-in，默认关闭）：72 小时后台校准一次，
+发现窗口 reset 已过会立刻重拉
 ```
 
 上游返回的 `429` 会分类处理，而不是无脑重试：明确的周/月额度耗尽就 block 到窗口结束；没指明窗口的额度失败退避 5 小时；明确的瞬时限流（比如并发超限）完全不 block。
@@ -100,7 +100,7 @@ plugins:
 <details>
 <summary>高级参数（只有手改 config.yaml 才需要）</summary>
 
-`providers`、`strategy`（接受但忽略）、`sticky`、`window_seconds`（120）、`max_inflight_per_profile`（8）、`quota_enabled`（true）、`quota_providers`、`quota_refresh_seconds`（72h，`0` 关闭）、`quota_probe_fresh`（true）、`quota_priorities`。
+`providers`、`strategy`（接受但忽略）、`sticky`、`window_seconds`（120）、`max_inflight_per_profile`（8）、`quota_enabled`（true）、`quota_providers`、`quota_refresh_seconds`（0 = 关闭，opt-in）、`quota_probe_fresh`（false，opt-in）、`quota_priorities`。
 
 </details>
 

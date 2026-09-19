@@ -245,13 +245,16 @@ func (r *Refresher) RefreshOnce() {
 // after the previous on-demand fetch, no matter how many profiles expired
 // at once, and each auth is single-flighted within the gap. A failed fetch
 // cools the auth down for failedCooldown before any path retries it.
-// Works even when background calibration is disabled (on-demand only).
+//
+// On-demand fetching only runs when background calibration is enabled
+// (interval > 0); with calibration disabled the plugin makes no active
+// upstream requests at all, and quota comes purely from passive signals.
 func (r *Refresher) RefreshAuthNow(authID string) {
 	if r == nil || authID == "" {
 		return
 	}
 	cfg := r.config()
-	if !cfg.Enabled {
+	if !cfg.Enabled || cfg.Interval <= 0 {
 		return
 	}
 	gap := r.gapOrDefault()

@@ -26,9 +26,10 @@ const (
 	DefaultStickyTTL             = 24 * time.Hour
 	DefaultWindow                = 120 * time.Second
 	DefaultMaxInflightPerProfile = 8
-	// DefaultQuotaCalibration is the default background precise-quota
-	// calibration interval. The usage-feedback ledger is the primary
-	// quota signal and needs no polling.
+	// DefaultQuotaCalibration is the suggested background precise-quota
+	// calibration interval for operators who opt in. The usage-feedback
+	// ledger is the primary quota signal and needs no polling; the
+	// default is disabled (0).
 	DefaultQuotaCalibration = 72 * time.Hour
 	// MaxQuotaCalibration caps the background calibration interval.
 	MaxQuotaCalibration = 7 * 24 * time.Hour
@@ -74,9 +75,9 @@ type Config struct {
 	// as a background calibration. The primary quota signal is the usage
 	// feedback ledger (usage.handle), which needs no polling; this only
 	// corrects drift (e.g. quota consumed outside CPA). Zero disables the
-	// background calibration entirely (pure on-demand via the management
-	// UI, which routes through this plugin's quota provider). Defaults to
-	// 72h.
+	// background calibration entirely (manual refresh through the
+	// management UI still works). Defaults to 0 (disabled): any active
+	// upstream request can attract risk control, so calibration is opt-in.
 	QuotaRefreshSeconds int `yaml:"quota_refresh_seconds"`
 	// QuotaProbeFresh sends one minimal "hi" request after a refresh shows
 	// the long window's reset interval at about the full window length
@@ -139,7 +140,7 @@ func (c Config) WithDefaults() Config {
 	// QuotaRefreshSeconds: 0 disables background calibration (on-demand
 	// only); negative means the default (72h).
 	if out.QuotaRefreshSeconds < 0 {
-		out.QuotaRefreshSeconds = int(DefaultQuotaCalibration / time.Second)
+		out.QuotaRefreshSeconds = 0
 	}
 	if out.QuotaRefreshSeconds > 0 && out.QuotaRefreshSeconds < 3600 {
 		out.QuotaRefreshSeconds = 3600
@@ -176,7 +177,7 @@ func DefaultConfig() Config {
 		WindowSeconds:         int(DefaultWindow / time.Second),
 		MaxInflightPerProfile: DefaultMaxInflightPerProfile,
 		QuotaEnabled:          true,
-		QuotaRefreshSeconds:   int(DefaultQuotaCalibration / time.Second),
+		QuotaRefreshSeconds:   0,
 		QuotaProbeFresh:       false,
 	}.WithDefaults()
 }
