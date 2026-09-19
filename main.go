@@ -320,7 +320,7 @@ func ensureQuotaRefresher() {
 		return
 	}
 	if quotaRefresher == nil {
-		quotaRefresher = quota.NewRefresher(cgoHostClient{}, quotaStore, quotaRefresherConfig)
+		quotaRefresher = quota.NewRefresher(cgoHostClient{}, quotaStore, quotaLedger, quotaRefresherConfig)
 	}
 	quotaRefresher.Start()
 }
@@ -660,15 +660,13 @@ func refreshQuotaNow(authID string) {
 	r.RefreshAuthNow(authID)
 }
 
-// maybeProbeFresh sends one minimal ping when authID is a never-used
-// profile of a quota-tracked provider, starting its weekly window countdown.
+// maybeProbeFresh sends one minimal ping when authID was never used,
+// starting its weekly window countdown. "Never used" is decided by the
+// local usage ledger alone: all usage flows through CPA, so the ledger is
+// authoritative, and upstream used_percent rounding to 0% proves nothing.
 func maybeProbeFresh(authID string) {
-	entry, ok := quotaLedger.Get(authID)
-	if ok && (!entry.Fresh() || entry.Probed) {
+	if entry, ok := quotaLedger.Get(authID); ok && !entry.Fresh() {
 		return
-	}
-	if _, ok := quotaStore.Get(authID); ok {
-		return // precise snapshot exists: not fresh
 	}
 	auths, err := cgoHostClient{}.ListAuths()
 	if err != nil {

@@ -90,6 +90,11 @@ type Config struct {
 type Refresher struct {
 	client HostClient
 	store  *Store
+	// ledger is the usage-feedback ledger, the authority on whether a
+	// profile was ever used: upstream used_percent rounds tiny usage to
+	// 0%, so it alone cannot prove "never used". May be nil in tests,
+	// which then fall back to the snapshot-only check.
+	ledger *Ledger
 	config func() Config
 
 	mu       sync.Mutex
@@ -112,10 +117,11 @@ type Refresher struct {
 }
 
 // NewRefresher returns a Refresher that is not yet running.
-func NewRefresher(client HostClient, store *Store, config func() Config) *Refresher {
+func NewRefresher(client HostClient, store *Store, ledger *Ledger, config func() Config) *Refresher {
 	return &Refresher{
 		client:   client,
 		store:    store,
+		ledger:   ledger,
 		config:   config,
 		probed:   make(map[string]bool),
 		failedAt: make(map[string]time.Time),
@@ -380,7 +386,11 @@ func (r *Refresher) refreshOne(auth AuthEntry, cfg Config) {
 	r.clearFailure(auth.ID)
 	r.store.Set(snap)
 
-	if cfg.ProbeFresh && snap.Fresh() {
+	// Probe only a profile with no local usage history: upstream
+	// used_percent rounds tiny usage to 0%, so it alone cannot prove the
+	// profile was never used. All usage flows through CPA, so the ledger
+	// is authoritative.
+	if cfg.ProbeFresh && snap.Fresh() && r.noLocalHistory(auth.ID) {
 		r.mu.Lock()
 		already := r.probed[auth.ID]
 		if !already {
@@ -390,6 +400,9 @@ func (r *Refresher) refreshOne(auth AuthEntry, cfg Config) {
 		if !already {
 			if creds, err := CredentialsForAuth(r.client, auth); err == nil {
 				ProbeFreshWindow(r.client.DoHTTP, creds)
+				if r.ledger != nil {
+					r.ledger.MarkProbed(auth.ID)
+				}
 			}
 		}
 	} else if !snap.Fresh() {
@@ -397,6 +410,17 @@ func (r *Refresher) refreshOne(auth AuthEntry, cfg Config) {
 		delete(r.probed, auth.ID)
 		r.mu.Unlock()
 	}
+}
+
+// noLocalHistory reports whether the usage-feedback ledger holds no record
+// of the profile ever being used. A nil ledger (tests) means no history is
+// known, preserving the snapshot-only check.
+func (r *Refresher) noLocalHistory(authID string) bool {
+	if r.ledger == nil {
+		return true
+	}
+	e, ok := r.ledger.Get(authID)
+	return !ok || e.Fresh()
 }
 
 func filterAuths(auths []AuthEntry, providers []string) []AuthEntry {

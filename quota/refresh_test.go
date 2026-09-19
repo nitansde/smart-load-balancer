@@ -89,7 +89,7 @@ func TestRefreshAuthNow_FetchesStaleSnapshot(t *testing.T) {
 		Long:      &Window{Kind: WindowWeekly, UsedPercent: &up, ResetAt: now.Add(-time.Hour)},
 		FetchedAt: now.Add(-time.Hour),
 	})
-	r := NewRefresher(client, store, func() Config { return Config{Enabled: true} })
+	r := NewRefresher(client, store, nil, func() Config { return Config{Enabled: true} })
 
 	r.RefreshAuthNow("a")
 
@@ -113,7 +113,7 @@ func TestRefreshAuthNow_SingleFlight(t *testing.T) {
 		usageBody: usageBodyWithReset(t, now.Add(5*time.Hour)),
 	}
 	store := NewStore()
-	r := NewRefresher(client, store, func() Config { return Config{Enabled: true} })
+	r := NewRefresher(client, store, nil, func() Config { return Config{Enabled: true} })
 
 	for i := 0; i < 10; i++ {
 		r.RefreshAuthNow("a")
@@ -136,7 +136,7 @@ func TestRefreshAuthNow_DisabledConfig(t *testing.T) {
 		usageBody: usageBodyWithReset(t, time.Now().Add(5*time.Hour)),
 	}
 	store := NewStore()
-	r := NewRefresher(client, store, func() Config { return Config{Enabled: false} })
+	r := NewRefresher(client, store, nil, func() Config { return Config{Enabled: false} })
 
 	r.RefreshAuthNow("a")
 	time.Sleep(200 * time.Millisecond)
@@ -157,7 +157,7 @@ func TestRefreshAuthNow_UnknownAuthDropsSnapshot(t *testing.T) {
 		Provider: "codex",
 		Long:     &Window{Kind: WindowWeekly, UsedPercent: &up},
 	})
-	r := NewRefresher(client, store, func() Config { return Config{Enabled: true} })
+	r := NewRefresher(client, store, nil, func() Config { return Config{Enabled: true} })
 
 	r.RefreshAuthNow("gone")
 	waitFor(t, 3*time.Second, func() bool {
@@ -179,7 +179,7 @@ func TestNeedsRefresh_FiveHourResetAloneDoesNotTrigger(t *testing.T) {
 		Long:      &Window{Kind: WindowWeekly, UsedPercent: &up, ResetAt: now.Add(6 * 24 * time.Hour)},
 		FetchedAt: now.Add(-time.Hour),
 	})
-	r := NewRefresher(client, store, func() Config { return Config{Enabled: true} })
+	r := NewRefresher(client, store, nil, func() Config { return Config{Enabled: true} })
 	auth := AuthEntry{ID: "a", AuthIndex: "0", Provider: "codex"}
 
 	if r.needsRefresh(auth, Config{Enabled: true}, now) {
@@ -203,7 +203,7 @@ func TestRefresh_FailureCooldown(t *testing.T) {
 		httpErr: fmt.Errorf("boom"),
 	}
 	store := NewStore()
-	r := NewRefresher(client, store, func() Config { return Config{Enabled: true} })
+	r := NewRefresher(client, store, nil, func() Config { return Config{Enabled: true} })
 	r.spread = time.Millisecond
 
 	r.RefreshOnce()
@@ -241,7 +241,7 @@ func TestRefreshAuthNow_SpacedApart(t *testing.T) {
 		usageBody: usageBodyWithReset(t, now.Add(5*time.Hour)),
 	}
 	store := NewStore()
-	r := NewRefresher(client, store, func() Config { return Config{Enabled: true} })
+	r := NewRefresher(client, store, nil, func() Config { return Config{Enabled: true} })
 	r.fetchGap = 200 * time.Millisecond
 
 	r.RefreshAuthNow("a")
@@ -268,7 +268,7 @@ func TestRefreshOnce_SpreadsFetches(t *testing.T) {
 		usageBody: usageBodyWithReset(t, now.Add(5*time.Hour)),
 	}
 	store := NewStore()
-	r := NewRefresher(client, store, func() Config { return Config{Enabled: true} })
+	r := NewRefresher(client, store, nil, func() Config { return Config{Enabled: true} })
 	r.spread = 300 * time.Millisecond
 
 	start := time.Now()
@@ -299,7 +299,7 @@ func TestRefreshOnce_SkipsPendingOnDemand(t *testing.T) {
 		usageBody: usageBodyWithReset(t, now.Add(5*time.Hour)),
 	}
 	store := NewStore()
-	r := NewRefresher(client, store, func() Config { return Config{Enabled: true} })
+	r := NewRefresher(client, store, nil, func() Config { return Config{Enabled: true} })
 	r.spread = time.Millisecond
 	r.fetchGap = time.Hour
 	r.mu.Lock()
@@ -320,5 +320,58 @@ func TestRefreshOnce_SkipsPendingOnDemand(t *testing.T) {
 	}
 	if _, ok := store.Get("a"); ok {
 		t.Fatal("a has a pending on-demand fetch and must be left alone")
+	}
+}
+
+func TestRefresherNoProbeWhenLedgerHasHistory(t *testing.T) {
+	client := &fakeHostClient{
+		auths:    []AuthEntry{{ID: "auth-1", AuthIndex: "0", Provider: "codex"}},
+		authJSON: map[string]json.RawMessage{"0": json.RawMessage(`{"access_token":"tok-a"}`)},
+		// Upstream reports 0% (fresh snapshot) even though the profile was
+		// used: tiny usage rounds to zero.
+		usage: map[string][]byte{"tok-a": []byte(freshUsage)},
+	}
+	store := NewStore()
+	ledger := NewLedger()
+	// Local call history exists: one observed request.
+	ledger.Observe(UsageObservation{AuthID: "auth-1", Provider: "codex", TotalTokens: 120})
+	cfg := testConfig()
+	cfg.ProbeFresh = true
+	r := NewRefresher(client, store, ledger, func() Config { return cfg })
+	r.spread = time.Millisecond
+	r.RefreshOnce()
+
+	for _, req := range client.requests {
+		if req.URL == codexProbeEndpoint {
+			t.Fatal("probe sent despite local usage history; upstream 0% alone must not decide freshness")
+		}
+	}
+}
+
+func TestRefresherProbeWhenLedgerClean(t *testing.T) {
+	client := &fakeHostClient{
+		auths:    []AuthEntry{{ID: "auth-1", AuthIndex: "0", Provider: "codex"}},
+		authJSON: map[string]json.RawMessage{"0": json.RawMessage(`{"access_token":"tok-a"}`)},
+		usage:    map[string][]byte{"tok-a": []byte(freshUsage)},
+	}
+	store := NewStore()
+	ledger := NewLedger() // no history: never used through CPA
+	cfg := testConfig()
+	cfg.ProbeFresh = true
+	r := NewRefresher(client, store, ledger, func() Config { return cfg })
+	r.spread = time.Millisecond
+	r.RefreshOnce()
+
+	probes := 0
+	for _, req := range client.requests {
+		if req.URL == codexProbeEndpoint {
+			probes++
+		}
+	}
+	if probes != 1 {
+		t.Errorf("probe sent %d times, want exactly 1 for a never-used profile", probes)
+	}
+	if e, ok := ledger.Get("auth-1"); !ok || !e.Probed {
+		t.Error("ledger should be marked probed after the background probe")
 	}
 }

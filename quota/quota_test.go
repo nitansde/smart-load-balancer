@@ -187,7 +187,7 @@ func TestRefresherPopulatesStore(t *testing.T) {
 		},
 	}
 	store := NewStore()
-	r := NewRefresher(client, store, testConfig)
+	r := NewRefresher(client, store, nil, testConfig)
 	r.spread = time.Millisecond
 	r.RefreshOnce()
 
@@ -229,7 +229,7 @@ func TestRefresherProbeFresh(t *testing.T) {
 	store := NewStore()
 	cfg := testConfig()
 	cfg.ProbeFresh = true
-	r := NewRefresher(client, store, func() Config { return cfg })
+	r := NewRefresher(client, store, nil, func() Config { return cfg })
 	r.spread = time.Millisecond
 	r.RefreshOnce()
 	r.RefreshOnce() // second cycle must not probe again
@@ -257,7 +257,7 @@ func TestRefresherDisabled(t *testing.T) {
 	store := NewStore()
 	cfg := testConfig()
 	cfg.Enabled = false
-	r := NewRefresher(client, store, func() Config { return cfg })
+	r := NewRefresher(client, store, nil, func() Config { return cfg })
 	r.RefreshOnce()
 	if _, ok := store.Get("auth-1"); ok {
 		t.Error("disabled refresher should not populate the store")
@@ -271,7 +271,7 @@ func TestNeedsRefresh(t *testing.T) {
 	now := time.Now()
 	auth := AuthEntry{ID: "auth-1", AuthIndex: "0", Provider: "codex"}
 	newRefresher := func(store *Store) *Refresher {
-		return NewRefresher(&fakeHostClient{}, store, testConfig)
+		return NewRefresher(&fakeHostClient{}, store, nil, testConfig)
 	}
 
 	// Never fetched -> refresh.
@@ -332,7 +332,7 @@ func TestRefresherPrunesRemovedAuths(t *testing.T) {
 	}
 	store := NewStore()
 	store.Set(Snapshot{AuthID: "auth-gone", Provider: "codex"})
-	r := NewRefresher(client, store, testConfig)
+	r := NewRefresher(client, store, nil, testConfig)
 	r.RefreshOnce()
 	if _, ok := store.Get("auth-gone"); ok {
 		t.Error("snapshot for removed auth should be pruned")
