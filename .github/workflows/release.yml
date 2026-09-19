@@ -23,7 +23,7 @@ jobs:
           for i in 1 2 3; do
             sudo apt-get update && break || sleep 20
           done
-          sudo apt-get install -y gcc-aarch64-linux-gnu gcc-mingw-w64-x86-64 gcc-mingw-w64-aarch64 zip
+          sudo apt-get install -y gcc-aarch64-linux-gnu gcc-mingw-w64-x86-64 zip
 
       - name: Install zig (darwin cross builds)
         uses: mlugg/setup-zig@v1

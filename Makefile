@@ -40,7 +40,7 @@ dist:
 	CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 CC="zig cc -target x86_64-macos" $(GO) build -buildmode=c-shared -o $(DIST)/darwin-amd64/$(PLUGIN_ID).dylib .
 	CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 CC="zig cc -target aarch64-macos" $(GO) build -buildmode=c-shared -o $(DIST)/darwin-arm64/$(PLUGIN_ID).dylib .
 	CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc $(GO) build -buildmode=c-shared -o $(DIST)/windows-amd64/$(PLUGIN_ID).dll .
-	CGO_ENABLED=1 GOOS=windows GOARCH=arm64 CC=aarch64-w64-mingw32-gcc $(GO) build -buildmode=c-shared -o $(DIST)/windows-arm64/$(PLUGIN_ID).dll .
+	CGO_ENABLED=1 GOOS=windows GOARCH=arm64 CC="zig cc -target aarch64-windows-gnu" $(GO) build -buildmode=c-shared -o $(DIST)/windows-arm64/$(PLUGIN_ID).dll .
 
 ## Package release zips in the CLIProxyAPI store layout:
 ##   <id>_<version>_<goos>_<goarch>.zip  (library at zip root) + checksums.txt
