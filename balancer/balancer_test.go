@@ -309,3 +309,84 @@ func TestConfigDefaultsAndValidation(t *testing.T) {
 		t.Fatalf("unexpected defaults: %+v", def)
 	}
 }
+
+// CPA-style tie-break: candidates tied on every ranking key rotate
+// round-robin in ID order (CPA's default scheduler semantics).
+func TestRoundRobinWithinTiedTier(t *testing.T) {
+	b, _ := newTestBalancer()
+	cfg := testConfig()
+	cfg.Sticky = false // isolate rotation from the sticky fast path
+	candidates := codexCandidates(3)
+
+	var got []string
+	for i := 0; i < 4; i++ {
+		id, ok := b.Pick("key", candidates, cfg)
+		if !ok {
+			t.Fatalf("pick %d not handled", i)
+		}
+		got = append(got, id)
+	}
+	want := []string{"codex-profile-0", "codex-profile-1", "codex-profile-2", "codex-profile-0"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("pick %d = %q, want %q (full sequence %v)", i, got[i], want[i], got)
+		}
+	}
+}
+
+// With identical profiles, the second key takes the next ID after the
+// first key's profile (no-conflict, then ID order), not a scattered one.
+func TestSecondKeyTakesNextID(t *testing.T) {
+	b, _ := newTestBalancer()
+	cfg := testConfig()
+	candidates := codexCandidates(4)
+
+	a, _ := b.Pick("key-A", candidates, cfg)
+	if a != "codex-profile-0" {
+		t.Fatalf("A picked %q, want codex-profile-0", a)
+	}
+	bb, _ := b.Pick("key-B", candidates, cfg)
+	if bb != "codex-profile-1" {
+		t.Fatalf("B picked %q, want codex-profile-1", bb)
+	}
+}
+
+// Natural ID order: numeric runs compare by value, so profile-2 comes
+// before profile-10 (plain string comparison would put 10 first).
+func TestNaturalIDOrder(t *testing.T) {
+	b, _ := newTestBalancer()
+	cfg := testConfig()
+	cfg.Sticky = false
+	candidates := []Candidate{
+		{ID: "profile-10", Provider: "codex"},
+		{ID: "profile-2", Provider: "codex"},
+		{ID: "profile-1", Provider: "codex"},
+	}
+	want := []string{"profile-1", "profile-2", "profile-10"}
+	for i, w := range want {
+		got, ok := b.Pick("key", candidates, cfg)
+		if !ok {
+			t.Fatalf("pick %d not handled", i)
+		}
+		if got != w {
+			t.Fatalf("pick %d = %q, want %q", i, got, w)
+		}
+	}
+}
+
+func TestNaturalIDLess(t *testing.T) {
+	cases := []struct{ a, b string; want bool }{
+		{"profile-2", "profile-10", true},
+		{"profile-10", "profile-2", false},
+		{"a", "b", true},
+		{"a1", "a1", false},
+		{"a01", "a1", false}, // equal value: fewer leading zeros first
+		{"a1", "a01", true},
+		{"9", "10", true},
+	}
+	for _, c := range cases {
+		if got := naturalIDLess(c.a, c.b); got != c.want {
+			t.Errorf("naturalIDLess(%q, %q) = %v, want %v", c.a, c.b, got, c.want)
+		}
+	}
+}

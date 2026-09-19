@@ -2,9 +2,7 @@ package balancer
 
 import (
 	"crypto/sha256"
-	"encoding/binary"
 	"encoding/hex"
-	"hash/fnv"
 	"net/http"
 	"sort"
 	"strings"
@@ -71,6 +69,11 @@ type Balancer struct {
 	now    func() time.Time
 	picks  []pickRecord
 	sticky map[string]stickyEntry
+	// lastPicked is the round-robin cursor: the most recent fresh pick.
+	// Within a tier of candidates tied on every ranking key, selection
+	// takes the first candidate after lastPicked (wrapping around),
+	// mirroring CPA's default scheduler.
+	lastPicked string
 }
 
 // New returns a Balancer using the real clock.
@@ -145,9 +148,12 @@ func (b *Balancer) Pick(keyHash string, candidates []Candidate, cfg Config) (str
 //     consumed tokens desc, never-used last,
 //     f. unknown: host priority tier, higher first (CPA's direction),
 //     g. fewest other-key sticky owners first,
-//     h. least recent load, then deterministic per-key tie-break.
+//     h. least recent load, then ID natural order with round-robin
+//     rotation, mirroring CPA's default scheduler (priority tiers, then
+//     ID order, then round-robin within the tier).
 //     The strategy setting is accepted for compatibility but ignored:
-//     selection always takes the top-ranked candidate.
+//     tiers are strict (the best tier always wins); rotation only happens
+//     among candidates tied on every ranking key.
 func (b *Balancer) PickWithQuota(keyHash string, candidates []Candidate, cfg Config, resolver QuotaResolver) (string, bool) {
 	cfg = cfg.WithDefaults()
 	now := b.now()
@@ -166,7 +172,10 @@ func (b *Balancer) PickWithQuota(keyHash string, candidates []Candidate, cfg Con
 		return "", false
 	}
 	if len(eligible) == 1 {
-		b.record(eligible[0].ID, keyHash, cfg)
+		b.mu.Lock()
+		b.lastPicked = eligible[0].ID
+		b.recordLocked(eligible[0].ID, keyHash, b.now(), cfg)
+		b.mu.Unlock()
 		return eligible[0].ID, true
 	}
 
@@ -200,10 +209,21 @@ func (b *Balancer) PickWithQuota(keyHash string, candidates []Candidate, cfg Con
 		}
 	}
 
-	ranked := rankCandidates(eligible, cfg, resolver, keyHash, loads, owners)
-	// The strategy setting is accepted for compatibility but ignored:
-	// selection always takes the top-ranked candidate.
-	chosen := ranked[0].ID
+	rs := newRankState(eligible, cfg, resolver, loads, owners)
+	ranked := rs.sorted(eligible)
+	// CPA's default scheduler rotates (round-robin) within a tier of
+	// tied candidates: take the first tier entry after the last pick,
+	// wrapping around. The strategy setting stays ignored: tiers are
+	// strict, rotation only happens among candidates tied on every key.
+	tier := rs.topTier(ranked)
+	chosen := tier[0].ID
+	for _, c := range tier {
+		if naturalIDLess(b.lastPicked, c.ID) {
+			chosen = c.ID
+			break
+		}
+	}
+	b.lastPicked = chosen
 	b.recordLocked(chosen, keyHash, now, cfg)
 	return chosen, true
 }
@@ -219,76 +239,136 @@ func userRank(priorities []string, authID string) int {
 	return len(priorities) + 1<<30
 }
 
-// rankCandidates sorts candidates for fresh selection. The order is stable
-// and deterministic for a fixed keyHash.
-func rankCandidates(candidates []Candidate, cfg Config, resolver QuotaResolver, keyHash string, loads, owners map[string]int) []Candidate {
+// rankState bundles the inputs to candidate ranking.
+type rankState struct {
+	cfg    Config
+	infos  map[string]QuotaInfo
+	loads  map[string]int
+	owners map[string]int
+	now    time.Time
+}
+
+func newRankState(candidates []Candidate, cfg Config, resolver QuotaResolver, loads, owners map[string]int) *rankState {
 	infos := make(map[string]QuotaInfo, len(candidates))
 	if resolver != nil {
 		for _, c := range candidates {
 			infos[c.ID] = resolver.Lookup(c.ID, c.Provider)
 		}
 	}
-	now := time.Now()
+	return &rankState{cfg: cfg, infos: infos, loads: loads, owners: owners, now: time.Now()}
+}
+
+// compare orders two candidates for fresh selection and returns 0 when
+// they tie on every ranking key. The order is deterministic.
+func (s *rankState) compare(a, b Candidate) int {
+	if ra, rb := userRank(s.cfg.QuotaPriorities, a.ID), userRank(s.cfg.QuotaPriorities, b.ID); ra != rb {
+		if ra < rb {
+			return -1
+		}
+		return 1
+	}
+	// No-conflict guarantee: a profile claimed by another client key
+	// sorts after every unclaimed profile. The owners key further
+	// below only decides among claimed profiles when no unclaimed
+	// candidate exists at all.
+	if ca, cb := s.owners[a.ID] > 0, s.owners[b.ID] > 0; ca != cb {
+		if cb {
+			return -1
+		}
+		return 1
+	}
+	qa, qb := s.infos[a.ID], s.infos[b.ID]
+	if qa.Known != qb.Known {
+		if qa.Known {
+			return -1
+		}
+		return 1
+	}
+	if qa.Known {
+		// Reset-soonest first: spend quota that renews soon before
+		// quota with a distant reset. Reset moments within
+		// resetTieWindow count as the same moment and fall through
+		// to the fill-first keys below.
+		if longResetLess(qa.LongResetAt, qb.LongResetAt, s.now) {
+			return -1
+		}
+		if longResetLess(qb.LongResetAt, qa.LongResetAt, s.now) {
+			return 1
+		}
+		pa, pb := qa.UsedPercent != nil, qb.UsedPercent != nil
+		if pa != pb {
+			if pa {
+				return -1
+			}
+			return 1
+		}
+		if pa {
+			if *qa.UsedPercent != *qb.UsedPercent {
+				// Fill-first: most-used (least remaining) first.
+				if *qa.UsedPercent > *qb.UsedPercent {
+					return -1
+				}
+				return 1
+			}
+		} else if qa.ConsumedTokens != qb.ConsumedTokens {
+			if qa.ConsumedTokens > qb.ConsumedTokens {
+				return -1
+			}
+			return 1
+		}
+	} else if a.Priority != b.Priority {
+		// Unknown-quota profiles follow the host priority tiers,
+		// higher first, mirroring CPA's default scheduler.
+		if a.Priority > b.Priority {
+			return -1
+		}
+		return 1
+	}
+	// Only reached when every candidate is claimed by other keys:
+	// prefer the fewest-claimed profile.
+	if s.owners[a.ID] != s.owners[b.ID] {
+		if s.owners[a.ID] < s.owners[b.ID] {
+			return -1
+		}
+		return 1
+	}
+	if s.loads[a.ID] != s.loads[b.ID] {
+		if s.loads[a.ID] < s.loads[b.ID] {
+			return -1
+		}
+		return 1
+	}
+	// Final key: candidate ID in natural order (numeric runs compared by
+	// value, so "profile-2" sorts before "profile-10"), mirroring CPA's
+	// default scheduler which orders each priority tier by auth ID.
+	// CPA's IDs are UUIDs, for which natural order matches plain string
+	// comparison exactly.
+	if a.ID != b.ID {
+		if naturalIDLess(a.ID, b.ID) {
+			return -1
+		}
+		return 1
+	}
+	return 0
+}
+
+// sorted returns candidates ordered for fresh selection.
+func (s *rankState) sorted(candidates []Candidate) []Candidate {
 	ranked := make([]Candidate, len(candidates))
 	copy(ranked, candidates)
-	sort.SliceStable(ranked, func(i, j int) bool {
-		a, bq := ranked[i], ranked[j]
-		if ra, rb := userRank(cfg.QuotaPriorities, a.ID), userRank(cfg.QuotaPriorities, bq.ID); ra != rb {
-			return ra < rb
-		}
-		// No-conflict guarantee: a profile claimed by another client key
-		// sorts after every unclaimed profile. The owners key further
-		// below only decides among claimed profiles when no unclaimed
-		// candidate exists at all.
-		if ca, cb := owners[a.ID] > 0, owners[bq.ID] > 0; ca != cb {
-			return cb
-		}
-		qa, qb := infos[a.ID], infos[bq.ID]
-		if qa.Known != qb.Known {
-			return qa.Known
-		}
-		if qa.Known {
-			// Reset-soonest first: spend quota that renews soon before
-			// quota with a distant reset. Reset moments within
-			// resetTieWindow count as the same moment and fall through
-			// to the fill-first keys below.
-			if longResetLess(qa.LongResetAt, qb.LongResetAt, now) {
-				return true
-			}
-			if longResetLess(qb.LongResetAt, qa.LongResetAt, now) {
-				return false
-			}
-			pa, pb := qa.UsedPercent != nil, qb.UsedPercent != nil
-			if pa != pb {
-				return pa
-			}
-			if pa {
-				if *qa.UsedPercent != *qb.UsedPercent {
-					// Fill-first: most-used (least remaining) first.
-					return *qa.UsedPercent > *qb.UsedPercent
-				}
-			} else if qa.ConsumedTokens != qb.ConsumedTokens {
-				return qa.ConsumedTokens > qb.ConsumedTokens
-			}
-		} else if a.Priority != bq.Priority {
-			// Unknown-quota profiles follow the host priority tiers,
-			// higher first, mirroring CPA's default scheduler.
-			return a.Priority > bq.Priority
-		}
-		// Only reached when every candidate is claimed by other keys:
-		// prefer the fewest-claimed profile.
-		if owners[a.ID] != owners[bq.ID] {
-			return owners[a.ID] < owners[bq.ID]
-		}
-		if loads[a.ID] != loads[bq.ID] {
-			return loads[a.ID] < loads[bq.ID]
-		}
-		if ta, tb := tieBreak(keyHash, a.ID), tieBreak(keyHash, bq.ID); ta != tb {
-			return ta < tb
-		}
-		return a.ID < bq.ID
-	})
+	sort.SliceStable(ranked, func(i, j int) bool { return s.compare(ranked[i], ranked[j]) < 0 })
 	return ranked
+}
+
+// topTier returns the maximal prefix of ranked candidates that tie with
+// the head on every ranking key: the rotation set for round-robin
+// selection.
+func (s *rankState) topTier(ranked []Candidate) []Candidate {
+	end := 1
+	for end < len(ranked) && s.compare(ranked[0], ranked[end]) == 0 {
+		end++
+	}
+	return ranked[:end]
 }
 
 // resetTieWindow is the tolerance within which two long-window reset
@@ -342,6 +422,7 @@ func (b *Balancer) Reset() {
 	defer b.mu.Unlock()
 	b.picks = nil
 	b.sticky = make(map[string]stickyEntry)
+	b.lastPicked = ""
 }
 
 // LoadSnapshot reports the current per-profile pick counts inside the window.
@@ -439,10 +520,41 @@ func containsCandidate(candidates []Candidate, id string) bool {
 	return false
 }
 
-func tieBreak(keyHash, candidateID string) uint64 {
-	h := fnv.New64a()
-	_, _ = h.Write([]byte(keyHash))
-	_, _ = h.Write([]byte{0})
-	_, _ = h.Write([]byte(candidateID))
-	return binary.LittleEndian.Uint64(h.Sum(nil)[:8])
+// naturalIDLess compares IDs with embedded numeric runs compared by
+// value, so "profile-2" sorts before "profile-10". Non-numeric parts
+// compare byte-wise. For fixed-format IDs such as CPA's UUIDs this
+// matches plain string comparison exactly.
+func naturalIDLess(a, b string) bool {
+	ia, ib := 0, 0
+	for ia < len(a) && ib < len(b) {
+		ca, cb := a[ia], b[ib]
+		da, db := ca >= '0' && ca <= '9', cb >= '0' && cb <= '9'
+		if da && db {
+			ja, jb := ia, ib
+			for ja < len(a) && a[ja] >= '0' && a[ja] <= '9' {
+				ja++
+			}
+			for jb < len(b) && b[jb] >= '0' && b[jb] <= '9' {
+				jb++
+			}
+			na, nb := strings.TrimLeft(a[ia:ja], "0"), strings.TrimLeft(b[ib:jb], "0")
+			if len(na) != len(nb) {
+				return len(na) < len(nb)
+			}
+			if na != nb {
+				return na < nb
+			}
+			if ja-ia != jb-ib {
+				return ja-ia < jb-ib
+			}
+			ia, ib = ja, jb
+			continue
+		}
+		if ca != cb {
+			return ca < cb
+		}
+		ia++
+		ib++
+	}
+	return len(a) < len(b)
 }
