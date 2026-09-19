@@ -15,7 +15,7 @@ const (
 	// (never-used) weekly window's countdown.
 	codexProbeEndpoint = "https://chatgpt.com/backend-api/codex/responses/compact"
 	codexProbeModel    = "gpt-5.4-mini"
-	codexProbePayload  = `{"model":"gpt-5.4-mini","instructions":"","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"ping"}]}]}`
+	codexProbePayload  = `{"model":"gpt-5.4-mini","instructions":"","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`
 	codexUserAgent     = "codex_cli_rs/0.76.0"
 
 	// defaultMaxStale is the backstop refresh age: even a profile nobody
