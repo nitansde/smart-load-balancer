@@ -313,6 +313,12 @@ func quotaRefresherConfig() quota.Config {
 func ensureQuotaRefresher() {
 	quotaRefresherMu.Lock()
 	defer quotaRefresherMu.Unlock()
+	if !loadedConfig().Enabled {
+		if quotaRefresher != nil {
+			quotaRefresher.Stop()
+		}
+		return
+	}
 	if quotaRefresher == nil {
 		quotaRefresher = quota.NewRefresher(cgoHostClient{}, quotaStore, quotaRefresherConfig)
 	}
@@ -398,60 +404,14 @@ func pluginRegistration() registration {
 			GitHubRepository: pluginRepo,
 			ConfigFields: []pluginapi.ConfigField{
 				{
-					Name:        "providers",
-					Type:        pluginapi.ConfigFieldTypeArray,
-					Description: "Only balance across these provider keys (for example codex). Empty means all providers.",
-				},
-				{
-					Name:        "strategy",
-					Type:        pluginapi.ConfigFieldTypeEnum,
-					EnumValues:  []string{balancer.StrategyLeastConnections, balancer.StrategyRoundRobin},
-					Description: "Accepted for compatibility but ignored: the plugin always takes the top-ranked candidate from its quota-aware ordering.",
-				},
-				{
-					Name:        "sticky",
+					Name:        "enabled",
 					Type:        pluginapi.ConfigFieldTypeBoolean,
-					Description: "Pin each client API key to one profile while it stays healthy, improving prompt-cache reuse.",
+					Description: "Master switch. When off, the plugin declines every pick and the host falls back to its default scheduler.",
 				},
 				{
 					Name:        "sticky_ttl_seconds",
 					Type:        pluginapi.ConfigFieldTypeInteger,
 					Description: "How long an idle sticky assignment is kept, in seconds. Defaults to 24h (86400). After expiry the client's most recently used profile is still preferred (soft preference).",
-				},
-				{
-					Name:        "window_seconds",
-					Type:        pluginapi.ConfigFieldTypeInteger,
-					Description: "Sliding window in seconds used to estimate recent load per profile.",
-				},
-				{
-					Name:        "max_inflight_per_profile",
-					Type:        pluginapi.ConfigFieldTypeInteger,
-					Description: "Recent-pick threshold above which a sticky assignment spills over to the least-loaded profile.",
-				},
-				{
-					Name:        "quota_enabled",
-					Type:        pluginapi.ConfigFieldTypeBoolean,
-					Description: "Enable quota-aware ordering: usage-feedback ledger plus precise quota via the quota provider. Defaults to true.",
-				},
-				{
-					Name:        "quota_providers",
-					Type:        pluginapi.ConfigFieldTypeArray,
-					Description: "Only fetch precise quota for these provider keys. Empty means every provider with a known quota endpoint.",
-				},
-				{
-					Name:        "quota_refresh_seconds",
-					Type:        pluginapi.ConfigFieldTypeInteger,
-					Description: "Background precise-quota calibration interval in seconds. 0 disables it (on-demand only via manual refresh). Defaults to 72h.",
-				},
-				{
-					Name:        "quota_probe_fresh",
-					Type:        pluginapi.ConfigFieldTypeBoolean,
-					Description: "Send one minimal ping the first time a never-used profile is selected, starting its weekly window countdown. Defaults to true.",
-				},
-				{
-					Name:        "quota_priorities",
-					Type:        pluginapi.ConfigFieldTypeArray,
-					Description: "Ordered auth profile IDs, most preferred first. Applies inside quota-aware ordering; unlisted profiles rank last.",
 				},
 			},
 		},
@@ -470,6 +430,9 @@ func pickAuth(raw []byte) ([]byte, error) {
 		return nil, errUnmarshal
 	}
 	cfg := loadedConfig()
+	if !cfg.Enabled {
+		return okEnvelope(pluginapi.SchedulerPickResponse{Handled: false})
+	}
 
 	candidates := make([]balancer.Candidate, 0, len(req.Candidates))
 	for _, c := range req.Candidates {
@@ -505,6 +468,9 @@ func handleUsage(raw []byte) ([]byte, error) {
 	var rec pluginapi.UsageRecord
 	if errUnmarshal := json.Unmarshal(raw, &rec); errUnmarshal != nil {
 		return nil, errUnmarshal
+	}
+	if !loadedConfig().Enabled {
+		return okEnvelope(map[string]bool{"handled": false})
 	}
 	observedAt := rec.RequestedAt
 	if observedAt.IsZero() {
@@ -546,6 +512,9 @@ func handleQuotaFetch(raw []byte) ([]byte, error) {
 	var req quotaFetchRequest
 	if errUnmarshal := json.Unmarshal(raw, &req); errUnmarshal != nil {
 		return nil, errUnmarshal
+	}
+	if !loadedConfig().Enabled {
+		return errorEnvelope("disabled", "smart load balancer is disabled"), nil
 	}
 	if !quota.HasEndpoint(req.Provider) {
 		return errorEnvelope("unsupported_provider", "no quota endpoint for provider "+req.Provider), nil

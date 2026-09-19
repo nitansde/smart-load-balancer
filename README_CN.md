@@ -40,37 +40,20 @@
      enabled: true
      configs:
        smart-load-balancer:
-         enabled: true
-         priority: 1
-         providers: ["codex"]      # 可选：只对这些 provider 做均衡；为空表示全部
-         strategy: least-connections # 为兼容而接受，实际被忽略
-         sticky: true
+         enabled: true             # 总开关；关闭 = 走主机默认调度
          sticky_ttl_seconds: 86400  # 24h（默认值）
-         window_seconds: 120
-         max_inflight_per_profile: 8
-         quota_enabled: true        # 额度感知排序，靠用量反馈（无需轮询）
-         quota_providers: ["codex"] # 有已知额度接口的 provider；为空表示全部已知
-         quota_refresh_seconds: 0   # 0 = 关闭后台校准（仅按需/手动）；默认 72h
-         quota_probe_fresh: true    # 首次选中从未用过的 profile 时发一次最小 ping，启动它的周窗口计时
-         quota_priorities: []       # 按偏好排序的 auth profile ID，最优先的在前；没列出的排最后
    ```
+   管理界面只露出这两个选项。其他参数（provider 范围、额度校准间隔、溢出阈值等）都用内置默认值。
 4. 重启 CLIProxyAPI。
 
 ## 配置
 
 | 字段 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
-| `providers` | array | `[]` | 只对这些 provider 做均衡（例如 `codex`），为空表示主机提供的全部。 |
-| `strategy` | enum | `least-connections` | 为兼容而接受（`least-connections` / `round-robin`），但实际被忽略：插件永远取额度感知排序的第一名。 |
-| `sticky` | bool | `true` | 每个 Key 固定到一个健康的 profile（prompt 缓存亲和）。 |
+| `enabled` | bool | `true` | 总开关。关闭后插件放弃每次选择，主机回退到默认调度器。 |
 | `sticky_ttl_seconds` | int | `86400`（24h） | 空闲的粘性绑定保留多久（秒），管理界面可调。 |
-| `window_seconds` | int | `120` | 估计各 profile 近期负载的滑动窗口（秒）。 |
-| `max_inflight_per_profile` | int | `8` | 粘性 profile 近期被选中超过该次数后溢出到负载最低的 profile。 |
-| `quota_enabled` | bool | `true` | 额度感知排序。主要信号是用量反馈账本（见下）；精准的上游快照只用于校准。 |
-| `quota_providers` | array | `[]` | 只对这些 provider 取精准额度。为空表示所有有已知额度接口的 provider。 |
-| `quota_refresh_seconds` | int | `259200`（72h） | 后台精准额度校准间隔。`0` 表示完全关闭后台校准：只在按需时刷新（管理界面手动刷新，会走本插件的 `quota.fetch`）。刻意设得很低频，避免上游限流风险。 |
-| `quota_probe_fresh` | bool | `true` | 首次选中从未用过的 profile 时，发一次最小 ping 来启动它的周窗口计时。 |
-| `quota_priorities` | array | `[]` | 按偏好排序的 auth profile ID，最优先的在前。在额度感知排序内部生效；没列出的排最后。 |
+
+其他参数保持内置默认值，管理界面里刻意不露出。如有需要仍可手改 `config.yaml` 设置：`providers`、`strategy`（接受但忽略）、`sticky`、`window_seconds`（120）、`max_inflight_per_profile`（8）、`quota_enabled`（true）、`quota_providers`、`quota_refresh_seconds`（72h）、`quota_probe_fresh`（true）、`quota_priorities`。
 
 如果没有候选 profile 匹配 `providers`，或主机没有提供候选，插件会放弃本次决策，主机回退到默认调度——本插件永远不会弄坏请求。
 

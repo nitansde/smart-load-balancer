@@ -39,6 +39,10 @@ const (
 
 // Config carries the plugin configuration decoded from the host-provided YAML.
 type Config struct {
+	// Enabled is the master switch. When false the plugin declines every
+	// scheduler pick (the host falls back to its default scheduler) and
+	// usage/quota handling becomes inert. Defaults to true.
+	Enabled bool `yaml:"enabled"`
 	// Providers optionally restricts balancing to these provider keys
 	// (for example ["codex"]). Empty means every provider offered by the host.
 	Providers []string `yaml:"providers"`
@@ -161,6 +165,7 @@ func (c Config) WithDefaults() Config {
 // DefaultConfig returns the recommended configuration.
 func DefaultConfig() Config {
 	return Config{
+		Enabled:               true,
 		Strategy:              DefaultStrategy,
 		Sticky:                DefaultSticky,
 		StickyTTLSeconds:      int(DefaultStickyTTL / time.Second),

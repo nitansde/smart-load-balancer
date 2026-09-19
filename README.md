@@ -40,37 +40,20 @@ Once published to the official store, install from the CLIProxyAPI management UI
      enabled: true
      configs:
        smart-load-balancer:
-         enabled: true
-         priority: 1
-         providers: ["codex"]      # optional: only balance these providers; empty = all
-         strategy: least-connections # accepted for compatibility, ignored
-         sticky: true
+         enabled: true             # master switch; off = host default scheduler
          sticky_ttl_seconds: 86400  # 24h (default)
-         window_seconds: 120
-         max_inflight_per_profile: 8
-         quota_enabled: true        # quota-aware ordering via usage feedback (no polling)
-         quota_providers: ["codex"] # providers with a known quota endpoint; empty = all known
-         quota_refresh_seconds: 0   # 0 = no background calibration (on-demand/manual only); default 72h
-         quota_probe_fresh: true    # send one "ping" when a never-used profile is first picked, starting its weekly window
-         quota_priorities: []       # ordered auth profile IDs, most preferred first; unlisted rank last
    ```
+   The management UI exposes only these two options. Everything else (providers, quota calibration interval, spillover threshold, …) keeps its built-in defaults.
 4. Restart CLIProxyAPI.
 
 ## Configuration
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `providers` | array | `[]` | Only balance across these provider keys (e.g. `codex`). Empty means every provider offered by the host. |
-| `strategy` | enum | `least-connections` | Accepted for compatibility (`least-connections` or `round-robin`) but ignored: the plugin always takes the top-ranked candidate from its quota-aware ordering. |
-| `sticky` | bool | `true` | Pin each client API key to one profile while it stays healthy (prompt-cache affinity). |
+| `enabled` | bool | `true` | Master switch. When off, the plugin declines every pick and the host falls back to its default scheduler. |
 | `sticky_ttl_seconds` | int | `86400` (24h) | How long an idle sticky assignment is kept. |
-| `window_seconds` | int | `120` | Sliding window used to estimate recent load per profile. |
-| `max_inflight_per_profile` | int | `8` | Recent-pick threshold above which a sticky assignment spills over to the least-loaded profile. |
-| `quota_enabled` | bool | `true` | Quota-aware ordering. Primary signal is the usage-feedback ledger (see below); precise upstream snapshots are only used for calibration. |
-| `quota_providers` | array | `[]` | Only consider precise quota for these providers. Empty means every provider with a known quota endpoint. |
-| `quota_refresh_seconds` | int | `259200` (72h) | Background precise-quota calibration interval. `0` disables background calibration entirely: quotas are then refreshed only on demand (manual refresh in the management UI, which routes through this plugin's `quota.fetch`). Kept deliberately infrequent to avoid upstream rate-limit risk. |
-| `quota_probe_fresh` | bool | `true` | When a never-used profile is picked for the first time, send one minimal ping to start its weekly window countdown. |
-| `quota_priorities` | array | `[]` | Ordered auth profile IDs, most preferred first. Applies inside quota-aware ordering; unlisted profiles rank last. |
+
+All other knobs keep their built-in defaults and are intentionally hidden from the UI. They remain settable via hand-edited `config.yaml` if you ever need them: `providers`, `strategy` (accepted, ignored), `sticky`, `window_seconds` (120), `max_inflight_per_profile` (8), `quota_enabled` (true), `quota_providers`, `quota_refresh_seconds` (72h), `quota_probe_fresh` (true), `quota_priorities`.
 
 If no candidate matches `providers`, or no candidates are offered at all, the plugin declines the pick and the host falls back to its default scheduling — requests are never broken by this plugin.
 
