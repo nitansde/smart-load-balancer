@@ -91,12 +91,6 @@ make zip VERSION=0.1.0  # 按商店格式打包 zip + checksums.txt
 
 端到端检查会把编译好的 `.so` 走一遍真实 C ABI（`plugin.register` → `scheduler.pick` → `plugin.reconfigure`），见开发时用的测试脚本。
 
-## 发布到官方商店
-
-1. 把 `go.mod`、`main.go`、`plugin-registry-entry.json` 中的 `nitansde` 换成真实的 GitHub 用户名，推送到 GitHub。
-2. 打 tag 发布：`git tag v0.1.0 && git push origin v0.1.0`。`release` 工作流会自动构建 6 个平台的 zip 和 `checksums.txt` 并挂到 GitHub Release 上。
-3. 向 `router-for-me/CLIProxyAPI-Plugins-Store` 提 PR，把 `plugin-registry-entry.json` 的内容加入 `registry.json`。
-
 ## License
 
 MIT

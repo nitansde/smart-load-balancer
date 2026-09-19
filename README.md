@@ -91,12 +91,6 @@ make zip VERSION=0.1.0  # package store-layout zips + checksums.txt
 
 An end-to-end check drives the compiled `.so` through the real C ABI (`plugin.register` → `scheduler.pick` → `plugin.reconfigure`) — see the test script used during development.
 
-## Publishing to the official store
-
-1. Replace `nitansde` in `go.mod`, `main.go`, and `plugin-registry-entry.json` with the real repo owner, then push to GitHub.
-2. Tag a release: `git tag v0.1.0 && git push origin v0.1.0`. The `release` workflow builds the six platform zips plus `checksums.txt` and attaches them to the GitHub release.
-3. Open a PR to `router-for-me/CLIProxyAPI-Plugins-Store` adding `plugin-registry-entry.json`'s object to `registry.json`.
-
 ## License
 
 MIT
