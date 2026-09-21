@@ -67,7 +67,7 @@ import (
 
 const (
 	pluginID      = "smart-load-balancer"
-	pluginVersion = "0.1.4"
+	pluginVersion = "0.1.7"
 	pluginAuthor  = "nitansde"
 	pluginRepo    = "https://github.com/nitansde/smart-load-balancer"
 	// quotaProviderIdentifier is the provider key this plugin serves
