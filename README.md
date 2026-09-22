@@ -68,7 +68,9 @@ A `429` from upstream is classified, not just retried: an explicit weekly/monthl
 
 ### Option A — plugin store (recommended, no build needed)
 
-Point CLIProxyAPI at this plugin's registry in `config.yaml`, restart, then install `smart-load-balancer` from the management UI's plugin store:
+The plugin is listed in the official CLIProxyAPI plugin store — open the plugin store in the management UI and install `smart-load-balancer`. No `config.yaml` changes needed.
+
+The self-hosted registry remains available as an alternative:
 
 ```yaml
 plugins:

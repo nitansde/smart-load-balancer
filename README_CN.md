@@ -67,7 +67,9 @@ K 已经有固定的 profile 了吗？
 
 ### 方案 A —— 插件商店（推荐，不用自己编译）
 
-在 `config.yaml` 里加上本插件的 registry，重启 CLIProxyAPI，然后在管理界面的插件商店里安装 `smart-load-balancer`：
+插件已上架官方 CLIProxyAPI 插件商店，在管理界面的插件商店里直接安装 `smart-load-balancer` 即可，不用改 `config.yaml`。
+
+自建 registry 仍然可用：
 
 ```yaml
 plugins:
