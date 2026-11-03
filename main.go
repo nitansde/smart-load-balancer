@@ -67,7 +67,7 @@ import (
 
 const (
 	pluginID      = "smart-load-balancer"
-	pluginVersion = "0.1.7"
+	pluginVersion = "0.1.8"
 	pluginAuthor  = "nitansde"
 	pluginRepo    = "https://github.com/nitansde/smart-load-balancer"
 	// quotaProviderIdentifier is the provider key this plugin serves
@@ -588,6 +588,8 @@ func (r *quotaResolver) Lookup(authID, provider string) balancer.QuotaInfo {
 	if snap, ok := quotaStore.Get(authID); ok {
 		info.Known = true
 		info.Fresh = false
+		info.FiveHourLimitKnown = snap.FiveHourKnown || snap.FiveHour != nil
+		info.HasFiveHourLimit = snap.FiveHour != nil
 		if snap.Long != nil && snap.Long.UsedPercent != nil {
 			info.UsedPercent = snap.Long.UsedPercent
 		}

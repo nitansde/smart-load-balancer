@@ -22,14 +22,12 @@ const sampleUsage = `{
 	}
 }`
 
-
 const exhaustedUsage = `{
 	"rate_limit": {
 		"primary_window": {"used_percent": 100, "limit_reached": true, "limit_window_seconds": 18000},
 		"secondary_window": {"used_percent": 95, "limit_window_seconds": 604800}
 	}
 }`
-
 
 func TestParseUsage(t *testing.T) {
 	parsed, err := ParseUsage([]byte(sampleUsage), time.Now())
@@ -78,6 +76,20 @@ func TestParseUsageCamelCase(t *testing.T) {
 	}
 	if parsed.Long == nil || parsed.Long.Kind != WindowMonthly {
 		t.Errorf("expected monthly long window, got %+v", parsed.Long)
+	}
+}
+
+func TestParseUsageMarksFiveHourStatusKnownWhenWindowIsAbsent(t *testing.T) {
+	raw := `{"rate_limit":{"secondary_window":{"used_percent":20,"limit_window_seconds":604800}}}`
+	parsed, err := ParseUsage([]byte(raw), time.Now())
+	if err != nil {
+		t.Fatalf("ParseUsage: %v", err)
+	}
+	if !parsed.FiveHourKnown {
+		t.Fatal("rate-limit response should establish five-hour status even when the window is absent")
+	}
+	if parsed.FiveHour != nil {
+		t.Fatalf("unexpected five-hour window: %+v", parsed.FiveHour)
 	}
 }
 

@@ -40,6 +40,13 @@ type QuotaInfo struct {
 	LongResetAt time.Time
 	// Fresh means never observed and no snapshot.
 	Fresh bool
+	// FiveHourLimitKnown reports whether the upstream explicitly described
+	// the five-hour window. It is separate from HasFiveHourLimit so a missing
+	// observation is not treated as an account without that limit.
+	FiveHourLimitKnown bool
+	// HasFiveHourLimit is true when the known five-hour window exists. Known
+	// accounts without one are preferred before accounts with this limit.
+	HasFiveHourLimit bool
 }
 
 // QuotaResolver supplies quota info per profile. A nil resolver reports
@@ -71,7 +78,7 @@ type historyEntry struct {
 // for the preference ranking. maxHistoryEntries caps the map; beyond it
 // the oldest entries are evicted.
 const (
-	historyTTL       = 7 * 24 * time.Hour
+	historyTTL        = 7 * 24 * time.Hour
 	maxHistoryEntries = 65536
 )
 
@@ -148,15 +155,17 @@ func (b *Balancer) Pick(keyHash string, candidates []Candidate, cfg Config) (str
 //     a. user quota_priorities order (unlisted last),
 //     b. profiles claimed by other client keys sort after every unclaimed
 //     profile (no-conflict guarantee; only when all candidates are
-//     claimed does the fewest-owners key in (g) decide),
+//     claimed does the fewest-owners key in (h) decide),
 //     c. quota-known profiles before unknown ones,
-//     d. known: long-window reset soonest first (weekly or monthly,
+//     d. among quota-known profiles, accounts explicitly without a
+//     five-hour limit before accounts with one,
+//     e. known: long-window reset soonest first (weekly or monthly,
 //     whichever the account is on; resets within an hour tie),
-//     e. same reset tier: fill-first, precise used% desc, else ledger
+//     f. same reset tier: fill-first, precise used% desc, else ledger
 //     consumed tokens desc, never-used last,
-//     f. unknown: host priority tier, higher first (CPA's direction),
-//     g. fewest other-key sticky owners first,
-//     h. least recent load, then natural ID order, first wins
+//     g. unknown: host priority tier, higher first (CPA's direction),
+//     h. fewest other-key sticky owners first,
+//     i. least recent load, then natural ID order, first wins
 //     (fill-first).
 //     The strategy setting is accepted for compatibility but ignored:
 //     tiers are strict (the best tier always wins); rotation only happens
@@ -295,6 +304,21 @@ func (s *rankState) compare(a, b Candidate) int {
 		return 1
 	}
 	if qa.Known {
+		// When the upstream explicitly reports that an account has no
+		// five-hour window, spend that account first. Unknown five-hour
+		// status remains neutral and never masquerades as unlimited.
+		fiveHourRank := func(q QuotaInfo) int {
+			if q.FiveHourLimitKnown && !q.HasFiveHourLimit {
+				return 0
+			}
+			return 1
+		}
+		if fa, fb := fiveHourRank(qa), fiveHourRank(qb); fa != fb {
+			if fa < fb {
+				return -1
+			}
+			return 1
+		}
 		// Reset-soonest first: spend quota that renews soon before
 		// quota with a distant reset. Reset moments within
 		// resetTieWindow count as the same moment and fall through
@@ -378,7 +402,6 @@ func (s *rankState) sorted(candidates []Candidate) []Candidate {
 	sort.SliceStable(ranked, func(i, j int) bool { return s.compare(ranked[i], ranked[j]) < 0 })
 	return ranked
 }
-
 
 // resetTieWindow is the tolerance within which two long-window reset
 // moments count as the same reset: the scheduler treats them as one tier

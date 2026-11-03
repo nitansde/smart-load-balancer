@@ -60,6 +60,34 @@ func TestPickWithQuota_FillFirstBySnapshot(t *testing.T) {
 	}
 }
 
+func TestPickWithQuota_PrefersAccountWithoutFiveHourLimit(t *testing.T) {
+	b := New()
+	cands := candidates("limited", "unlimited")
+	// The limited account has more favorable long-window data, but a known
+	// account without a five-hour window must still be selected first.
+	resolver := stubResolver{infos: map[string]QuotaInfo{
+		"limited":   {Known: true, FiveHourLimitKnown: true, HasFiveHourLimit: true, UsedPercent: pct(10)},
+		"unlimited": {Known: true, FiveHourLimitKnown: true, HasFiveHourLimit: false, UsedPercent: pct(90)},
+	}}
+	authID, ok := b.PickWithQuota("key", cands, quotaTestConfig(), resolver)
+	if !ok || authID != "unlimited" {
+		t.Fatalf("expected account without five-hour limit first, got %q (ok=%v)", authID, ok)
+	}
+}
+
+func TestPickWithQuota_UnknownFiveHourStatusIsNotUnlimited(t *testing.T) {
+	b := New()
+	cands := candidates("known-limited", "unknown")
+	resolver := stubResolver{infos: map[string]QuotaInfo{
+		"known-limited": {Known: true, FiveHourLimitKnown: true, HasFiveHourLimit: true, UsedPercent: pct(90)},
+		"unknown":       {Known: true, UsedPercent: pct(10)},
+	}}
+	authID, ok := b.PickWithQuota("key", cands, quotaTestConfig(), resolver)
+	if !ok || authID != "known-limited" {
+		t.Fatalf("unknown five-hour status must not be treated as unlimited, got %q (ok=%v)", authID, ok)
+	}
+}
+
 func TestPickWithQuota_LedgerConsumedTokensFillFirst(t *testing.T) {
 	b := New()
 	cands := candidates("a", "b")

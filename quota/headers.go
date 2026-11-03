@@ -40,6 +40,7 @@ func SnapshotFromHeaders(authID, provider string, h http.Header, observedAt time
 		switch w.Kind {
 		case WindowFiveHour:
 			snap.FiveHour = w
+			snap.FiveHourKnown = true
 		case WindowWeekly, WindowMonthly:
 			snap.Long = w
 		}

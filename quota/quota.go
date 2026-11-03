@@ -73,12 +73,17 @@ func (w Window) NextReset(now time.Time) time.Time {
 
 // Snapshot is the latest known quota state of one auth profile.
 type Snapshot struct {
-	AuthID    string
-	Provider  string
-	FiveHour  *Window
-	Long      *Window // weekly or monthly, whichever the account is on
-	PlanType  string
-	FetchedAt time.Time
+	AuthID   string
+	Provider string
+	FiveHour *Window
+	// FiveHourKnown is true when the upstream response described the
+	// account's five-hour window (including an explicit absence of one).
+	// It stays false for partial observations that did not include five-hour
+	// headers, so missing data is not mistaken for an unlimited account.
+	FiveHourKnown bool
+	Long          *Window // weekly or monthly, whichever the account is on
+	PlanType      string
+	FetchedAt     time.Time
 }
 
 // Fresh reports whether the long (weekly/monthly) window shows zero use.
@@ -208,6 +213,9 @@ func (s *Store) MergeSnapshot(partial Snapshot) {
 	}
 	if partial.FiveHour != nil {
 		cur.FiveHour = partial.FiveHour
+	}
+	if partial.FiveHourKnown {
+		cur.FiveHourKnown = true
 	}
 	if partial.Long != nil {
 		cur.Long = partial.Long

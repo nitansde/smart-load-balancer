@@ -34,9 +34,10 @@ is it still healthy?    rank every profile — top one wins:
   │ yes     │ no          1. your quota_priorities (your VIP list)
   ▼         ▼             2. not claimed by another key right now
 use it   fail over        3. quota known beats quota unknown
-(cache stays warm)        4. resets soonest first — spend quota that renews soon
-                          5. most-used first — fill it up before it resets
-                          6. host priority, least load, last-used, ID order…
+(cache stays warm)        4. accounts without a five-hour limit first
+                          5. resets soonest first — spend quota that renews soon
+                          6. most-used first — fill it up before it resets
+                          7. host priority, least load, last-used, ID order…
                         remember the winner as K's sticky profile
 ```
 
@@ -116,7 +117,7 @@ The management UI shows three options; everything else keeps sane built-in defau
 - **It never breaks requests.** If no candidate matches, or the plugin is off, it declines the pick and the host falls back to its default scheduler.
 - **The `strategy` setting** is accepted for compatibility but ignored — the ranking above always decides.
 - **Calibrating a stale or new account.** The plugin never sends probe requests. When an account's snapshot goes stale (a long-window reset passed) or an account is brand new, it is marked for calibration and the next suitable real request is borrowed for one shot — preferably from a key whose recent requests average small token counts (each key's last 100 requests). If no small-key traffic shows up within 5 minutes, any key's request may be borrowed. The borrowed request never changes the key's sticky pinning, and a borrow that teaches nothing (non-quota failure) cools down for 5 minutes before retrying.
-- **Ranking, precisely.** Fresh selection orders candidates: (1) your `quota_priorities`; (2) profiles claimed by other keys sort after unclaimed ones (only when every candidate is claimed does fewest-claimed win); (3) quota-known before unknown; (4) long-window (weekly/monthly) reset-soonest first — resets within 1 hour count as the same moment, unknown resets rank last; (5) fill-first within a tier: highest precise `used_percent`, else highest ledger token count, never-used last; (6) unknown-quota profiles follow host priority (higher first); (7) least recent load; (8) the key's last-used profile (soft hint only); (9) natural ID order, head wins.
+- **Ranking, precisely.** Fresh selection orders candidates: (1) your `quota_priorities`; (2) profiles claimed by other keys sort after unclaimed ones (only when every candidate is claimed does fewest-claimed win); (3) quota-known before unknown; (4) among quota-known profiles, accounts whose upstream snapshot explicitly has no five-hour window; (5) long-window (weekly/monthly) reset-soonest first — resets within 1 hour count as the same moment, unknown resets rank last; (6) fill-first within a tier: highest precise `used_percent`, else highest ledger token count, never-used last; (7) unknown-quota profiles follow host priority (higher first); (8) least recent load; (9) the key's last-used profile (soft hint only); (10) natural ID order, head wins. A missing five-hour observation remains unknown and is not treated as an unlimited account.
 
 ## Development
 

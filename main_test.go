@@ -32,6 +32,23 @@ func TestLongWindowResetPassed_Monthly(t *testing.T) {
 	}
 }
 
+func TestQuotaResolverMarksAccountWithoutFiveHourLimit(t *testing.T) {
+	now := time.Now()
+	used := 10.0
+	quotaStore.Set(quota.Snapshot{
+		AuthID:        "no-five-hour",
+		Provider:      "codex",
+		FiveHourKnown: true,
+		Long:          &quota.Window{Kind: quota.WindowWeekly, UsedPercent: &used, ResetAt: now.Add(24 * time.Hour)},
+	})
+	defer quotaStore.Remove("no-five-hour")
+
+	info := (&quotaResolver{now: func() time.Time { return now }}).Lookup("no-five-hour", "codex")
+	if !info.Known || !info.FiveHourLimitKnown || info.HasFiveHourLimit {
+		t.Fatalf("expected known account without five-hour limit, got %+v", info)
+	}
+}
+
 // With the master switch off the plugin must decline scheduler picks so
 // the host falls back to its default scheduler.
 func TestDisabledPluginDeclinesPick(t *testing.T) {

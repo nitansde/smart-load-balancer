@@ -99,12 +99,13 @@ func FetchSnapshot(client HostClient, auth AuthEntry) (Snapshot, error) {
 		return Snapshot{}, err
 	}
 	return Snapshot{
-		AuthID:    auth.ID,
-		Provider:  strings.ToLower(auth.Provider),
-		FiveHour:  parsed.FiveHour,
-		Long:      parsed.Long,
-		PlanType:  parsed.PlanType,
-		FetchedAt: time.Now(),
+		AuthID:        auth.ID,
+		Provider:      strings.ToLower(auth.Provider),
+		FiveHour:      parsed.FiveHour,
+		FiveHourKnown: parsed.FiveHourKnown,
+		Long:          parsed.Long,
+		PlanType:      parsed.PlanType,
+		FetchedAt:     time.Now(),
 	}, nil
 }
 func usageHeaders(creds Credentials) map[string]string {

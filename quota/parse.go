@@ -17,7 +17,10 @@ const (
 type Parsed struct {
 	PlanType string
 	FiveHour *Window
-	Long     *Window // weekly or monthly
+	// FiveHourKnown reports that the response included a rate-limit object,
+	// so an absent five-hour window is meaningful rather than merely unknown.
+	FiveHourKnown bool
+	Long          *Window // weekly or monthly
 }
 
 // ParseUsage parses a chatgpt.com/backend-api/wham/usage response body.
@@ -33,12 +36,14 @@ func ParseUsage(raw []byte, now time.Time) (Parsed, error) {
 	if !ok {
 		return parsed, nil
 	}
+	sawWindow := false
 	for i, key := range []string{"primary_window", "secondary_window"} {
 		alt := []string{"primaryWindow", "secondaryWindow"}[i]
 		rawWindow, ok := getMap(rateLimit, key, alt)
 		if !ok {
 			continue
 		}
+		sawWindow = true
 		w := parseWindow(rawWindow, now, i)
 		switch w.Kind {
 		case WindowFiveHour:
@@ -47,6 +52,7 @@ func ParseUsage(raw []byte, now time.Time) (Parsed, error) {
 			parsed.Long = &w
 		}
 	}
+	parsed.FiveHourKnown = sawWindow
 	return parsed, nil
 }
 
